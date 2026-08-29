@@ -37,19 +37,28 @@ shopping_copilot/
 
 ### What data exists per product
 
-Based on Amazon Reviews 2023 dataset:
+**VERIFIED against actual data/catalog.jsonl** — use these exact field names or you'll get KeyErrors:
 ```
-asin          — unique product ID  (e.g. "B07XYZ1234")
-title         — product name
-description   — long text description
-features      — list of bullet points (["Lightweight", "Waterproof"])
-price         — float  (or None if missing)
-brand         — string
-categories    — list of lists  [["Clothing", "Shoes", "Running"]]
-rating        — average star rating (0–5)
-rating_count  — number of reviews
-images        — list of URLs (ignore these, text-only task)
+parent_asin    — unique product ID (e.g. "B07K34RX5J")  ← NOT "asin"
+title          — product name string
+description    — LIST of strings (NOT a single string) e.g. ["Long text..."]
+                 → join with " ".join(p["description"]) to get searchable text
+features       — list of strings e.g. ["Spandex", "Made in USA", "Lightweight..."]
+price          — float e.g. 27.99, or null (~20% of products have no price)
+store          — brand/store name e.g. "Spirit Hoops"  ← NOT "brand"
+categories     — FLAT list of strings e.g. ["Clothing, Shoes & Jewelry", "Women", "Jewelry"]
+                 → NOT a list of lists — it's already flat
+details        — dict e.g. {"Department": "Womens", "Product Dimensions": "..."}
+average_rating — float 0.0–5.0, or None
+rating_number  — int review count, or None
 ```
+
+**Fields that do NOT exist** (will cause KeyError — do not use):
+- `"asin"` → use `"parent_asin"`
+- `"brand"` → use `"store"`
+- `"rating"` → use `"average_rating"`
+- `"rating_count"` → use `"rating_number"`
+- `"images"` → not in this dataset
 
 ### How to build it
 
@@ -69,7 +78,7 @@ class Catalog:
                 p = json.loads(line)
                 idx = len(self.products)
                 self.products.append(p)
-                self.asin_to_idx[p["asin"]] = idx
+                self.asin_to_idx[p["parent_asin"]] = idx  # key is "parent_asin" not "asin"
 
         # Step 2: build BM25 index
         # Concatenate searchable text fields
@@ -98,21 +107,21 @@ class Catalog:
                 self.category_index.setdefault(c.lower(), []).append(idx)
 
     def _product_text(self, p: dict) -> str:
-        parts = [p.get("title", ""), p.get("brand", "")]
+        # "store" is the brand field. "description" is a list of strings.
+        desc = p.get("description", [])
+        desc_text = " ".join(desc) if isinstance(desc, list) else str(desc)
+        parts = [p.get("title", ""), p.get("store", "")]
         parts += p.get("features", [])
-        parts.append(p.get("description", ""))
+        parts.append(desc_text)
         return " ".join(filter(None, parts))
 
     def _tokenize(self, text: str) -> list[str]:
         return re.sub(r"[^a-z0-9\s]", "", text.lower()).split()
 
     def _flatten_categories(self, categories) -> list[str]:
-        # categories = [["Clothing", "Shoes", "Running"]]
-        result = []
-        for path in categories:
-            if isinstance(path, list):
-                result += path
-        return result
+        # categories is already a FLAT list of strings — no need to unwrap
+        # e.g. ["Clothing, Shoes & Jewelry", "Women", "Jewelry", "Earrings"]
+        return [c for c in categories if isinstance(c, str)]
 ```
 
 **Why cache embeddings?** Encoding 50k products takes ~3 minutes on CPU. Caching them to `.npy` means startup is <5 seconds on subsequent runs. For the hackathon this is critical — you'll restart many times.
@@ -502,12 +511,12 @@ def _passes_filters(self, product: dict, filters: dict) -> bool:
         return False
 
     if filters.get("brand"):
-        product_brand = product.get("brand", "").lower()
-        if filters["brand"].lower() not in product_brand:
+        product_store = product.get("store", "").lower()  # "store" not "brand"
+        if filters["brand"].lower() not in product_store:
             return False
 
     # Reject products the user already said no to
-    if product.get("asin") in filters.get("rejected_asins", []):
+    if product.get("parent_asin") in filters.get("rejected_asins", []):  # "parent_asin" not "asin"
         return False
 
     return True
@@ -744,8 +753,8 @@ def rerank_with_llm(
     user_needs = _summarize_user_needs(state)
 
     product_list = "\n".join(
-        f"ASIN: {p['asin']} | {p.get('title','')[:80]} | "
-        f"${p.get('price','N/A')} | {p.get('brand','')}"
+        f"ASIN: {p['parent_asin']} | {p.get('title','')[:80]} | "
+        f"${p.get('price','N/A')} | {p.get('store','')}"
         for p in pool
     )
 
@@ -800,9 +809,9 @@ def heuristic_rerank(candidates: list[dict], state: ConversationState, top_k: in
             if _category_match(product, s["category"]):
                 total += 5.0
 
-        # Brand match
+        # Brand/store match ("store" is the brand field in this dataset)
         if s.get("brand"):
-            if s["brand"].lower() in product.get("brand", "").lower():
+            if s["brand"].lower() in product.get("store", "").lower():
                 total += 3.0
 
         # Price constraint (HARD — violating it gives a heavy penalty)
@@ -813,16 +822,16 @@ def heuristic_rerank(candidates: list[dict], state: ConversationState, top_k: in
             else:
                 total -= 10.0   # heavy penalty for over-budget
 
-        # Rating bonus (prefer popular products)
-        total += product.get("rating", 0.0) * 0.5
+        # Rating bonus (prefer popular products) — field is "average_rating" not "rating"
+        total += (product.get("average_rating") or 0.0) * 0.5
 
-        # Review count bonus (log-scale, cap at 1.0)
+        # Review count bonus (log-scale, cap at 1.0) — field is "rating_number" not "rating_count"
         import math
-        count = product.get("rating_count") or 0
+        count = product.get("rating_number") or 0
         total += min(math.log10(count + 1) * 0.3, 1.0)
 
         # Penalize rejected products
-        if product.get("asin") in state.rejected_asins:
+        if product.get("parent_asin") in state.rejected_asins:
             total -= 100.0
 
         return total
@@ -885,9 +894,9 @@ def _template_response(products: list[dict], state: ConversationState) -> str:
     for i, p in enumerate(products, 1):
         title  = p.get("title", "Unknown product")[:70]
         price  = f"${p['price']:.2f}" if p.get("price") else "Price not listed"
-        rating = f"⭐ {p['rating']:.1f} ({p.get('rating_count', 0)} reviews)" if p.get("rating") else ""
-        brand  = p.get("brand", "")
-        asin   = p.get("asin", "")
+        rating = f"⭐ {p['average_rating']:.1f} ({p.get('rating_number', 0)} reviews)" if p.get("average_rating") else ""
+        brand  = p.get("store", "")      # "store" is the brand field
+        asin   = p.get("parent_asin", "")
 
         lines.append(f"{i}. **{title}**")
         if brand:
