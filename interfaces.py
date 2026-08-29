@@ -14,21 +14,22 @@ IMPORTANT — Evaluator API (from docs/agent_api_contract.json):
         {
             "message":         str,           # text reply shown to user
             "ask_attribute":   str | None,    # slot name if clarifying, else None
+                               # REQUIRED field — use null, not omit
                                # allowed values: "category", "material", "color",
                                # "size", "style", "brand", "budget", "feature",
                                # "use_case", "other", null
-            "recommendations": [              # list of products, best first
-                {"parent_asin": str, "score": float},
+            "recommendations": [              # list of products, best first (max 100, scored on top 10)
+                {"parent_asin": str},         # "score" field is IGNORED by the evaluator — only parent_asin matters
                 ...
             ],
-            "usage": {                        # token counts (set 0 if no LLM used)
+            "usage": {                        # optional but include it — token counts (set 0 if no LLM)
                 "prompt_tokens": int,
                 "completion_tokens": int,
             }
         }
 
     The catalog field is "parent_asin", NOT "asin". Double-check your catalog loading.
-    top_k is always 10 in the competition.
+    top_k is always 10 in the competition. recommendations maxItems is 100 — return up to 50 safely.
 """
 
 from __future__ import annotations
@@ -49,60 +50,114 @@ class Product:
 
     VERIFIED against data/catalog.jsonl — actual field names and types:
         parent_asin    — unique ID e.g. "B07K34RX5J"  (NOT "asin" — that field does not exist)
-        title          — product name string
+        title          — product name string  (2 products have empty title — guard with `or ""`)
         description    — LIST of strings (NOT a single string!) e.g. ["Long description..."]
+                         EMPTY LIST in 47.8% of products (23,887 / 50,000) — don't rely on it
         features       — list of strings e.g. ["Spandex", "Made in USA", "Lightweight..."]
-        price          — float e.g. 27.99, OR null (~20% of products have no price listed)
+                         EMPTY LIST in 10.4% of products (5,219 / 50,000)
+        price          — float, string, OR null. Three cases:
+                           null string   : 39,473 products (78.9%) — no price listed
+                           string        : 117 products — garbage like "—" or "from 12.99"
+                           float         : remaining ~10,410 products, range $0.01–$4119
+                           zero (float 0): 1 product — treat as missing
+                         USE safe_price() helper below, NOT raw p["price"]
         store          — brand/store name e.g. "Spirit Hoops"  (NOT "brand" — that field does not exist)
+                         null in 314 products — from_dict returns "" in that case
         categories     — FLAT list of strings e.g. ["Clothing, Shoes & Jewelry", "Women", "Jewelry"]
                          (NOT a list of lists — the whole path is already one flat list)
-        details        — dict of extra metadata e.g. {"Department": "Womens", "Product Dimensions": ...}
-        average_rating — float 0.0–5.0  (NEVER null — all 50k products have this)
-        rating_number  — int review count  (NEVER null — all 50k products have this)
-
-    CRITICAL — price is null in 78.9% of products (39,473 / 50,000).
-        ALWAYS guard: if product.get("price") is not None and product["price"] > filters.price_max
-        Never filter like: product["price"] > 100  ← KeyError or wrong on null products
+                         First element is always "Clothing, Shoes & Jewelry" (49,990/50,000)
+                         NEVER empty — all 50k products have at least one category
+        details        — dict of extra metadata, NEVER null (1,670 products have empty dict {})
+                         Useful keys (verified counts):
+                           "Department"  — 43,582 products — gender e.g. "Womens", "Mens", "Girls"
+                           "Brand"       — 2,328 products  — secondary brand when store is null
+                           "Material"    — 2,069 products
+                           "Color"       — 2,439 products
+                           "Size"        — 925 products
+        average_rating — float 1.0–5.0  (NEVER null — all 50k products have this)
+        rating_number  — int > 0  (NEVER null or zero — all 50k products have this)
 
     WRONG fields used in initial plan (do NOT use these — they will KeyError):
         "asin"        → use "parent_asin"
-        "brand"       → use "store"
+        "brand"       → use "store"  (or details["Brand"] as fallback)
         "rating"      → use "average_rating"
         "rating_count"→ use "rating_number"
         description as str → it is a list, call .description_text() to get a string
     """
     parent_asin: str
     title: str
-    price: Optional[float]
-    store: str                  # brand equivalent
-    categories: list[str]       # flat list of strings, NOT list of lists
-    features: list[str]
-    description: list[str]      # list of strings — join to get full text
-    details: dict
-    average_rating: float               # never null in this dataset
-    rating_number: int                  # never null in this dataset
+    price: Optional[float]              # use safe_price() — raw value may be str or 0
+    store: str                          # brand equivalent — "" when null (314 products)
+    categories: list[str]               # flat list of strings, NOT list of lists
+    features: list[str]                 # may be empty list (10.4% of products)
+    description: list[str]             # may be empty list (47.8% of products)
+    details: dict                       # never null; useful keys: Department, Brand, Material, Color
+    average_rating: float               # never null, range 1.0–5.0
+    rating_number: int                  # never null or zero
 
     @staticmethod
     def from_dict(d: dict) -> "Product":
         """Convert a raw catalog dict to a Product."""
         return Product(
             parent_asin=d.get("parent_asin", ""),
-            title=d.get("title", ""),
-            price=d.get("price"),
-            store=d.get("store", ""),
-            categories=d.get("categories", []),     # already a flat list
-            features=d.get("features", []),
-            description=d.get("description", []),   # list of strings
-            details=d.get("details", {}),
-            average_rating=d.get("average_rating"),
-            rating_number=d.get("rating_number"),
+            title=d.get("title") or "",
+            price=Product._safe_price(d.get("price")),
+            store=d.get("store") or "",             # 314 products have store=null
+            categories=d.get("categories") or [],
+            features=d.get("features") or [],
+            description=d.get("description") or [], # list of strings
+            details=d.get("details") or {},
+            average_rating=d.get("average_rating") or 0.0,
+            rating_number=d.get("rating_number") or 0,
         )
+
+    @staticmethod
+    def _safe_price(raw) -> Optional[float]:
+        """
+        Convert raw price to float or None.
+        Handles: null → None, float → float, str "—" → None, str "from 12.99" → None,
+                 float 0 → None (treat zero as missing).
+        """
+        if raw is None:
+            return None
+        try:
+            val = float(raw)
+            return val if val > 0 else None
+        except (ValueError, TypeError):
+            return None
 
     def description_text(self) -> str:
         """Join description list into one searchable string."""
         if isinstance(self.description, list):
             return " ".join(self.description)
         return str(self.description)
+
+    def gender_from_details(self) -> Optional[str]:
+        """
+        Extract gender from details["Department"] — present in 43,582 / 50,000 products.
+        Returns "women", "men", "girls", "boys", "unisex", or None.
+        """
+        dept = (self.details.get("Department") or "").lower()
+        if not dept:
+            return None
+        if "women" in dept or "female" in dept or "ladies" in dept:
+            return "women"
+        if "men" in dept or "male" in dept:
+            return "men"
+        if "girls" in dept:
+            return "girls"
+        if "boys" in dept:
+            return "boys"
+        if "unisex" in dept or "adult" in dept:
+            return "unisex"
+        return None
+
+    def brand(self) -> str:
+        """
+        Best available brand string — tries store first, falls back to details["Brand"].
+        Returns "" if neither is available.
+        """
+        return self.store or self.details.get("Brand", "")
 
 
 @dataclass
@@ -148,20 +203,28 @@ class ConversationState:
     max_turns:    int = 10      # hard competition limit — do not exceed
 
     # --- user profile (passed by evaluator at reset time) ---
-    # VERIFIED: actual fields in public_set.jsonl:
-    #   purchase_frequency  — e.g. "3-4 prior purchases"
-    #   average_prior_rating — float e.g. 5.0, or null
-    #   rating_style        — e.g. "usually positive", "critical"
-    #   preference_tags     — list of strings e.g. ["fit", "comfort", "durability"]
-    #   summary             — one sentence e.g. "Prior purchases emphasize fit..."
+    # VERIFIED: actual fields in public_set.jsonl (all 200 sessions):
+    #   purchase_frequency   — always "3-4 prior purchases" in public set
+    #   average_prior_rating — float e.g. 5.0  (never null in public set, despite contract allowing null)
+    #   rating_style         — one of: "usually positive", "mixed", "critical"
+    #   preference_tags      — list of strings e.g. ["fit", "comfort", "durability"]
+    #   summary              — one sentence e.g. "Prior purchases emphasize fit..."
     user_profile: dict = field(default_factory=dict)
 
     # --- what the user wants ---
-    # VERIFIED scenario types in dataset: "buying", "browsing", "intent_override", "boundary"
-    # "buying"         → BUYING intent, specific product in mind
-    # "browsing"       → BROWSING intent, exploring options
-    # "intent_override"→ starts as one thing, switches mid-session (hardest case)
-    # "boundary"       → edge case / ambiguous (10 sessions only)
+    # VERIFIED scenario counts in public set (200 sessions):
+    #   "buying"         →  80 sessions — specific product, hard constraints
+    #   "browsing"       →  80 sessions — exploring, soft preferences
+    #   "intent_override"→  30 sessions — switches request mid-session (hardest)
+    #   "boundary"       →  10 sessions — edge case, user says "no preference"
+    # difficulty_bucket: easy=80, medium=90, hard=30 (in session JSON but NOT passed to agent)
+    #
+    # CRITICAL — intent_override hit timing (verified from evaluator source):
+    #   override fires at turn 3 or 4 (randomly assigned per session)
+    #   recommendations on turns BEFORE the override turn can NEVER score a hit
+    #   even if the correct product is returned — the evaluator blocks it
+    #   → in intent_override sessions, earliest possible hit = turn 3
+    #   → don't waste clarification turns early; search fast and pivot on the override message
     intent: str = "UNKNOWN"     # "BUYING" | "BROWSING" | "UNKNOWN"
     slots:  Slots = field(default_factory=Slots)
 
@@ -193,6 +256,8 @@ class Filters:
         price_max      — always set if slots.price_max is not None
         price_min      — set if slots.price_min is not None
         brand          — set ONLY in BUYING mode (in BROWSING, brand is a soft preference)
+                         NOTE: Person 1 must match this against product["store"], not product["brand"]
+                         e.g. filters.brand = "Nike" → check if "nike" in product["store"].lower()
         rejected_asins — always pass state.rejected_asins here
     """
     price_max:      Optional[float]     = None
@@ -251,7 +316,8 @@ def retrieve(
 
     Returns:
         List of up to top_k raw product dicts from the catalog.
-        Each dict has at minimum: asin, title, price, brand, categories, features.
+        Each dict has at minimum: parent_asin, title, price, store, categories, features.
+        NOTE: brand is "store" in the catalog — use product["store"], NOT product["brand"].
         Sorted by relevance descending (best match first).
         Returns [] if nothing found.
 
