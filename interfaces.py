@@ -280,7 +280,7 @@ class OrchestratorDecision:
         "CLARIFY"  — ask user a question, no retrieval this turn
         "FALLBACK" — could not find products, tell user to relax constraints
     """
-    action: str                         # "SEARCH" | "CLARIFY" | "FALLBACK"
+    action: str                         # "SEARCH" | "CLARIFY" | "FALLBACK" | "SEARCH_CLARIFY"
     missing_slots: list[str] = field(default_factory=list)  # only set when action="CLARIFY"
     reason: str = ""                    # short debug string e.g. "over_general", "near_limit"
     diverse: bool = False               # True = browsing mode, prioritise variety in retrieval
@@ -570,105 +570,7 @@ def build_filters(state: ConversationState) -> Filters:
     )
 
 
-def respond(
-    ranked_products: list[dict],
-    state: ConversationState,
-    action: str,
-    clarification_question: Optional[str] = None,
-    asked_slot: Optional[str] = None,
-    prompt_tokens: int = 0,
-    completion_tokens: int = 0,
-) -> dict:
-    """
-    Build and return the evaluator-compatible response dict for one turn.
-    This is what agent.respond() ultimately returns — must match agent_api_contract.json.
-
-    Args:
-        ranked_products       : Output of rerank(). Empty list = nothing found.
-        state                 : Full conversation state.
-        action                : "SEARCH" | "CLARIFY" | "FALLBACK"
-        clarification_question: The question string if action="CLARIFY".
-        asked_slot            : The slot name being asked about, e.g. "price_max", "use_case".
-                                REQUIRED when action="CLARIFY" — the evaluator uses ask_attribute
-                                to decide what answer to give back. If None, evaluator replies
-                                "Those options are not quite right yet" — a wasted turn.
-        prompt_tokens         : LLM prompt tokens used this turn (0 if no LLM).
-        completion_tokens     : LLM completion tokens used this turn.
-
-    Returns:
-        {
-            "message":         str,        # text reply to user
-            "ask_attribute":   str | None, # slot being asked about, or None
-            "recommendations": [{"parent_asin": str, "score": float}, ...],
-            "usage":           {"prompt_tokens": int, "completion_tokens": int}
-        }
-
-    ask_attribute allowed values (from agent_api_contract.json):
-        "category", "material", "color", "size", "style",
-        "brand", "budget", "feature", "use_case", "other", null
-
-        Slot name → ask_attribute mapping:
-            price_max / price_min  →  "budget"
-            features               →  "feature"
-            material               →  "material"   (not in Slots but valid ask_attribute)
-            all others             →  same name (they match exactly)
-
-    Example — CLARIFY asking about budget:
-        respond([], state, "CLARIFY", "What's your budget?", asked_slot="price_max")
-        # {"message": "What's your budget?", "ask_attribute": "budget",
-        #  "recommendations": [], "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
-
-    Example — SEARCH with results:
-        respond(ranked, state, "SEARCH")
-        # {"message": "Here are the top results for Nike running shoes...",
-        #  "ask_attribute": None,
-        #  "recommendations": [{"parent_asin": "B07XYZ", "score": 1.0}, ...],
-        #  "usage": {"prompt_tokens": 150, "completion_tokens": 40}}
-
-    Example — FALLBACK (empty results):
-        respond([], state, "FALLBACK")
-        # {"message": "I couldn't find Nike running shoes under $50...",
-        #  "ask_attribute": None, "recommendations": [],
-        #  "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
-    """
-    SLOT_TO_ATTR = {
-        "price_max": "budget", "price_min": "budget",
-        "features":  "feature",
-    }
-    VALID_ATTRS = {"category", "material", "color", "size", "style",
-                   "brand", "budget", "feature", "use_case", "other"}
-
-    usage = {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
-
-    # STUB — Person 3 replaces this body
-    if action == "CLARIFY":
-        ask_attr = SLOT_TO_ATTR.get(asked_slot or "", asked_slot or "other")
-        if ask_attr not in VALID_ATTRS:
-            ask_attr = "other"
-        return {
-            "message": clarification_question or "Could you tell me more?",
-            "ask_attribute": ask_attr,
-            "recommendations": [],
-            "usage": usage,
-        }
-
-    recs = [
-        {"parent_asin": p.get("parent_asin", p.get("asin", "")), "score": float(len(ranked_products) - i)}
-        for i, p in enumerate(ranked_products)
-    ]
-    message = (
-        f"Top result: {ranked_products[0].get('title', 'Unknown')} — "
-        f"${ranked_products[0].get('price', 'N/A')}"
-        if ranked_products else
-        "I couldn't find products matching your criteria. Try relaxing one constraint."
-    )
-    return {
-        "message": message,
-        "ask_attribute": None,
-        "recommendations": recs,
-        "usage": usage,
-    }
-
+# removed because it is inaccurate
 
 # =============================================================================
 # QUICK REFERENCE — Turn flow in agent.py

@@ -4,6 +4,12 @@ import json
 import re
 import sqlite3
 from pathlib import Path
+from starter.orchestration.orchestration import (
+    build_filters,
+    build_query,
+    generate_clarification,
+)
+from starter.orchestration.responder import format_response
 
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
@@ -36,43 +42,26 @@ class Agent:
     """Editable weak baseline: stateless BM25 retrieval with no LLM dependency."""
 
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
-        self.catalog_path = Path(catalog_path)
-        self.connection = sqlite3.connect(":memory:")
-        self._sessions: set[str] = set()
-        self._build_index()
+        self.catalog = Catalog(catalog_path)
 
-    def _build_index(self) -> None:
-        cursor = self.connection.cursor()
-        cursor.execute(
-            "CREATE VIRTUAL TABLE products USING fts5("
-            "parent_asin UNINDEXED, title, categories, features, details, store, description, "
-            "tokenize='unicode61 remove_diacritics 2')"
-        )
-        batch: list[tuple[str, str, str, str, str, str, str]] = []
-        with self.catalog_path.open(encoding="utf-8") as handle:
-            for line in handle:
-                product = json.loads(line)
-                batch.append(
-                    (
-                        str(product["parent_asin"]),
-                        _text(product.get("title")),
-                        _text(product.get("categories")),
-                        _text(product.get("features")),
-                        _text(product.get("details")),
-                        _text(product.get("store")),
-                        _text(product.get("description")),
-                    )
-                )
-                if len(batch) >= 1000:
-                    cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
-                    batch.clear()
-        if batch:
-            cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
-        self.connection.commit()
+        # TODO: load llm using config
+        llm_client = 
+
+        self.retrieval    = RetrievalPipeline(self.catalog)
+        self.orchestrator = Orchestrator()
+        self.reranker     = LLMReranker(llm_client)
+        self.responder    = Responder(llm_client)
+        self.llm          = llm_client
+
+        self.state = None
+        self.memory = None
+        self.reset()
 
     def reset(self, session_id: str, user_profile: dict) -> None:
         # The profile is anonymized and may be used for personalization.
         self._sessions.add(session_id)
+        self.state = ConversationState()
+        self.memory = SessionMemory()
 
     def respond(
         self,
@@ -83,20 +72,28 @@ class Agent:
     ) -> dict:
         if session_id not in self._sessions:
             raise RuntimeError("reset must be called before respond")
-        unique_terms = list(dict.fromkeys(_terms(user_message)))[:40]
-        expression = " OR ".join(f'"{term}"' for term in unique_terms)
-        if not expression:
-            recommendations: list[dict] = []
-        else:
-            rows = self.connection.execute(
-                "SELECT parent_asin FROM products WHERE products MATCH ? "
-                "ORDER BY bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0) LIMIT ?",
-                (expression, top_k),
-            ).fetchall()
-            recommendations = [{"parent_asin": str(row[0])} for row in rows]
-        return {
-            "message": "Here are the closest matches I found.",
-            "ask_attribute": None,
-            "recommendations": recommendations,
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
-        }
+
+        self.state.turn_count = turn  
+
+        self.state = update_state(self.state, user_message)
+
+        est = estimate_result_count(self.state, self.catalog)
+
+        decision = decide(self.state, est)
+
+        if decision.action == "CLARIFY":
+            question = generate_clarification(decision.missing_slots, self.state)
+            if question:
+                asked = decision.missing_slots[0]
+                return format_response([], "CLARIFY", question, asked_slot=asked)
+            else:
+                decision.action = "SEARCH"
+
+        if decision.action == "SEARCH":
+               query      = build_query(self.state)
+               filters    = build_filters(self.state)
+               candidates = retrieve(query, filters, top_k=50, buying_mode=(self.state.intent == "BUYING"))
+               ranked     = rerank(candidates, self.state, top_k=10)    
+               return format_response(ranked, "SEARCH")          
+
+
