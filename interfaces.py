@@ -295,6 +295,7 @@ def retrieve(
     filters: Filters,
     top_k: int = 50,
     buying_mode: bool = False,
+    category: str | None = None,
 ) -> list[dict]:
     """
     Search the 50k catalog and return the top-K most relevant raw product dicts.
@@ -314,6 +315,11 @@ def retrieve(
                       If False, apply filters SOFTLY (penalise violations, don't exclude).
                       Person 3 sets this to (state.intent == "BUYING").
 
+        category    : Optional category string (e.g. slots.category) to restrict
+                      search to matching products. Narrows from 50k to ~1k products,
+                      improving recall within the right category. Defaults to None
+                      (search full catalog). Pass state.slots.category when available.
+
     Returns:
         List of up to top_k raw product dicts from the catalog.
         Each dict has at minimum: parent_asin, title, price, store, categories, features.
@@ -327,6 +333,7 @@ def retrieve(
             filters=Filters(price_max=100.0, brand="Nike"),
             top_k=50,
             buying_mode=True,
+            category="Running Shoes",
         )
         # candidates[0] = {"parent_asin": "B07XYZ", "title": "Nike Air Zoom...", "price": 89.99, ...}
     """

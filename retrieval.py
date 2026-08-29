@@ -71,6 +71,7 @@ class RetrievalPipeline:
         filters: Filters,
         top_k: int = 50,
         buying_mode: bool = False,
+        category: str | None = None,
     ) -> list[dict]:
         """
         Hybrid BM25 + vector retrieval with RRF fusion and hard filtering.
@@ -81,27 +82,23 @@ class RetrievalPipeline:
             top_k       : Number of candidates to return
             buying_mode : If True, hard-exclude filter violations;
                           if False, include more broadly (browsing)
+            category    : If set, restrict search to products in this category
 
         Returns:
             List of up to top_k raw product dicts, best first.
         """
-        # An empty query passed to BM25 tokenization returns no tokens, which produces
-        # all-zero scores and an empty result list. This fallback ensures we always
-        # return something sensible even at the very start of a session.
         if not query or not query.strip():
             query = "clothing shoes jewelry"
 
-        # Each arm returns (index, score) pairs
-        bm25_results = self._bm25_search(query, top_k=_ARM_TOP_K)
-        vec_results = self._vector_search(query, top_k=_ARM_TOP_K)
+        allowed = self._get_category_indices(category) if category else None
 
-        # Fuse with RRF
-        fused = self._rrf_merge(bm25_results, vec_results)  # list[(idx, score)]
+        bm25_results = self._bm25_search(query, top_k=_ARM_TOP_K, allowed_indices=allowed)
+        vec_results = self._vector_search(query, top_k=_ARM_TOP_K, allowed_indices=allowed)
 
-        # Apply filters — strict in buying mode, lenient in browsing
+        fused = self._rrf_merge(bm25_results, vec_results)
+
         filtered = self._apply_filters(fused, filters, strict=buying_mode)
 
-        # Return top_k raw dicts
         result = []
         for idx, _score in filtered[:top_k]:
             result.append(self.catalog.products[idx])
@@ -155,6 +152,9 @@ class RetrievalPipeline:
         parts.extend(slots.features or [])
         if state.last_query:
             parts.append(state.last_query)
+
+        pref_tags = (state.user_profile or {}).get("preference_tags") or []
+        parts.extend(pref_tags)
 
         pref_query = " ".join(parts).strip()
 
@@ -247,18 +247,64 @@ class RetrievalPipeline:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _bm25_search(self, query: str, top_k: int) -> list[tuple[int, float]]:
-        """Return (product_idx, bm25_score) pairs for top_k BM25 results."""
-        query_tokens = bm25s.tokenize([query], stopwords="en", show_progress=False)
-        results, scores = self.catalog.bm25.retrieve(query_tokens, k=min(top_k, len(self.catalog.products)), show_progress=False)
-        # results/scores shape: (1, k) — one query
-        return [
-            (int(idx), float(score))
-            for idx, score in zip(results[0], scores[0])
-            if score > 0
-        ]
+    def _get_category_indices(self, category: str) -> set[int] | None:
+        """
+        Return the set of product indices belonging to the given category.
+        Tries the full string first, then each word individually.
+        Skips overly broad words that would match most of the catalog.
+        Returns None if no match or too broad (caller falls back to full catalog).
+        """
+        cat_index = self.catalog.category_index
+        key = category.lower().strip()
+        if not key:
+            return None
 
-    def _vector_search(self, query: str, top_k: int) -> list[tuple[int, float]]:
+        _SKIP = {"clothing", "shoes", "jewelry", "men", "women", "mens", "womens",
+                 "boys", "girls", "men's", "women's", "shop", "accessories"}
+
+        # Try full string first
+        if key in cat_index:
+            return set(cat_index[key])
+
+        # Try each word — pick the most specific match (smallest result set > 0)
+        best: set[int] | None = None
+        for word in key.split():
+            word = word.strip()
+            if not word or word in _SKIP:
+                continue
+            matched: set[int] = set()
+            for cat_key, indices in cat_index.items():
+                if word in cat_key:
+                    matched.update(indices)
+            if matched and (best is None or len(matched) < len(best)):
+                best = matched
+
+        if best and len(best) < len(self.catalog.products) * 0.5:
+            return best
+        return None
+
+    def _bm25_search(
+        self, query: str, top_k: int, allowed_indices: set[int] | None = None,
+    ) -> list[tuple[int, float]]:
+        """Return (product_idx, bm25_score) pairs for top_k BM25 results."""
+        fetch_k = top_k if allowed_indices is None else min(top_k * 5, len(self.catalog.products))
+        query_tokens = bm25s.tokenize([query], stopwords="en", show_progress=False)
+        results, scores = self.catalog.bm25.retrieve(query_tokens, k=min(fetch_k, len(self.catalog.products)), show_progress=False)
+        out = []
+        for idx, score in zip(results[0], scores[0]):
+            if score <= 0:
+                continue
+            idx_int = int(idx)
+            if allowed_indices is not None and idx_int not in allowed_indices:
+                continue
+            out.append((idx_int, float(score)))
+            if len(out) >= top_k:
+                break
+        return out
+
+    def _vector_search(
+        self, query: str, top_k: int, allowed_indices: set[int] | None = None,
+    ) -> list[tuple[int, float]]:
         """Return (product_idx, cosine_sim) pairs for top_k vector results."""
         q_vec = self.catalog.encoder.encode(
             query,
@@ -266,16 +312,20 @@ class RetrievalPipeline:
             convert_to_numpy=True,
         ).astype(np.float32)
 
-        # Single matrix-vector multiply scores all 50k products at once via BLAS.
-        # This is orders of magnitude faster than looping and computing each similarity
-        # individually — NumPy dispatches to optimised CPU routines (AVX/SSE) internally.
-        sims = self.catalog.embeddings @ q_vec                 # ndarray len=N
+        sims = self.catalog.embeddings @ q_vec
 
-        # argpartition is O(N) vs argsort's O(N log N) — it finds the top-k bucket
-        # without fully sorting all 50k scores. We then sort only those top-k entries.
-        top_indices = np.argpartition(sims, -min(top_k, len(sims)))[-top_k:]
+        if allowed_indices is not None:
+            mask = np.full(len(sims), -np.inf)
+            for i in allowed_indices:
+                mask[i] = sims[i]
+            sims = mask
+
+        k = min(top_k, int((sims > -np.inf).sum()))
+        if k == 0:
+            return []
+        top_indices = np.argpartition(sims, -k)[-k:]
         top_indices = top_indices[np.argsort(sims[top_indices])[::-1]]
-        return [(int(idx), float(sims[idx])) for idx in top_indices]
+        return [(int(idx), float(sims[idx])) for idx in top_indices if sims[idx] > -np.inf]
 
     def _rrf_merge(
         self,
@@ -304,6 +354,39 @@ class RetrievalPipeline:
         # naturally floating to the top — that's the hybrid benefit.
         merged = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
         return merged  # list[(idx, rrf_score)]
+
+    # Tested and is worse than RRF fusion, but left here if we wanna try again
+    def _dbsf_merge(
+        self,
+        bm25_results: list[tuple[int, float]],
+        vec_results: list[tuple[int, float]],
+    ) -> list[tuple[int, float]]:
+        """
+        Distribution-Based Score Fusion.
+        Normalise each arm's raw scores to z-scores, then add.
+        Preserves score gaps: a blowout BM25 hit stays dominant after fusion.
+        """
+        def z_normalise(results: list[tuple[int, float]]) -> list[tuple[int, float]]:
+            if len(results) < 2:
+                return [(idx, 0.0) for idx, _ in results]
+            scores = np.array([s for _, s in results], dtype=np.float64)
+            mean = scores.mean()
+            std = scores.std()
+            if std < 1e-9:
+                return [(idx, 0.0) for idx, _ in results]
+            return [(idx, float((s - mean) / std)) for idx, s in results]
+
+        bm25_z = z_normalise(bm25_results)
+        vec_z = z_normalise(vec_results)
+
+        combined: dict[int, float] = {}
+        for idx, z in bm25_z:
+            combined[idx] = combined.get(idx, 0.0) + z
+        for idx, z in vec_z:
+            combined[idx] = combined.get(idx, 0.0) + z
+
+        merged = sorted(combined.items(), key=lambda x: x[1], reverse=True)
+        return merged
 
     def _apply_filters(
         self,
@@ -389,9 +472,10 @@ def retrieve(
     filters: Filters,
     top_k: int = 50,
     buying_mode: bool = False,
+    category: str | None = None,
 ) -> list[dict]:
     """Drop-in replacement for the retrieve() stub in interfaces.py."""
-    return _get_pipeline().retrieve(query, filters, top_k=top_k, buying_mode=buying_mode)
+    return _get_pipeline().retrieve(query, filters, top_k=top_k, buying_mode=buying_mode, category=category)
 
 
 def rerank(

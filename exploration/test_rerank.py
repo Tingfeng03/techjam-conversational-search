@@ -161,8 +161,8 @@ def main():
         else:
             query = category
 
-        # Retrieve top-50
-        candidates = pipeline.retrieve(query, Filters(), top_k=RETRIEVE_K)
+        # Retrieve top-50 with category pre-filtering
+        candidates = pipeline.retrieve(query, Filters(), top_k=RETRIEVE_K, category=category)
         candidate_asins = [c["parent_asin"] for c in candidates]
         ret_rank = candidate_asins.index(target) + 1 if target in candidate_asins else None
 
@@ -171,6 +171,7 @@ def main():
         state = ConversationState(session_id=f"test_{i}")
         state.slots = slots
         state.last_query = query
+        state.user_profile = sess.get("user_profile", {})
 
         # Rerank
         ranked = pipeline.rerank(candidates, state, top_k=RERANK_K)
