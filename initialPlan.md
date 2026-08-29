@@ -715,126 +715,73 @@ def generate_clarification_question(missing_slots: list[str], state: Conversatio
 
 ---
 
-## Component 6: LLM Reranker (`reranker.py`)
+## Component 6: Embedding Reranker (`retrieval.py` — `rerank()`)
 
 **Purpose**: Take the top-50 candidates from retrieval and reorder them so the most relevant product is ranked first. This directly improves MRR.
 
-### With LLM
+**Approach: embedding cosine similarity (implemented in `retrieval.py`)**
+
+Keyword/heuristic scoring was rejected because it hardcodes synonyms — "genuine leather" won't match `"leather"`, "navy" won't match `"blue"`, "Nike Air" won't match `"nike"`. Each miss requires a new rule. Embedding similarity handles all of this automatically.
+
+The reranker:
+1. Builds one preference query string from all accumulated slots + `state.last_query`
+2. Encodes it once with the same `all-MiniLM-L6-v2` encoder already loaded in `Catalog`
+3. Scores each candidate by `cosine_sim(preference_vec, product_vec)` — product vectors are looked up from the pre-computed `catalog_embeddings.npy` matrix (no extra inference per candidate)
+4. Two small non-embedding adjustments only:
+   - Gender: uses `details["Department"]` structural field — more reliable than embedding for this binary attribute
+   - Rating: tiny tiebreaker (0–0.02 range, never overrides similarity signal)
 
 ```python
-RERANK_PROMPT = """You are a precise shopping assistant. A user is looking for: {user_needs}
-
-Here are {n} candidate products. Return the {top_k} most relevant ASIN codes, ordered best-first.
-
-Products:
-{product_list}
-
-Ranking rules:
-1. Products satisfying ALL user constraints rank first
-2. If a budget was stated, STRICTLY exclude products exceeding it
-3. Brand preference must be respected if stated
-4. Consider the use case and purpose the user described
-
-Return ONLY a JSON array of ASIN strings. Example: ["B01ABC", "B02DEF"]
-Return exactly {top_k} items."""
-
-
-def rerank_with_llm(
-    candidates: list[dict],
-    state: ConversationState,
-    llm,
-    top_k: int = 10
-) -> list[dict]:
+def rerank(self, candidates, state, top_k=10):
     if not candidates:
         return []
 
-    # Cap at 50 for LLM context efficiency
-    pool = candidates[:50]
-    user_needs = _summarize_user_needs(state)
+    rejected = set(state.rejected_asins or [])
+    slots = state.slots
 
-    product_list = "\n".join(
-        f"ASIN: {p['parent_asin']} | {p.get('title','')[:80]} | "
-        f"${p.get('price','N/A')} | {p.get('store','')}"
-        for p in pool
-    )
-
-    prompt = RERANK_PROMPT.format(
-        user_needs=user_needs,
-        n=len(pool),
-        top_k=top_k,
-        product_list=product_list
-    )
-
-    try:
-        raw = llm.complete(prompt, max_tokens=300)
-        ranked_asins = json.loads(raw)
-        asin_map = {p["asin"]: p for p in pool}
-        reranked = [asin_map[a] for a in ranked_asins if a in asin_map]
-        # Append any that the LLM didn't mention (to always return top_k)
-        mentioned = set(ranked_asins)
-        reranked += [p for p in pool if p["asin"] not in mentioned]
-        return reranked[:top_k]
-    except Exception:
-        # LLM failed — fall back to heuristic scoring
-        return heuristic_rerank(candidates, state, top_k)
-
-
-def _summarize_user_needs(state: ConversationState) -> str:
+    # Build preference query from all accumulated slots
     parts = []
-    s = state.slots
-    if s.get("category"):   parts.append(s["category"])
-    if s.get("brand"):      parts.append(f"brand: {s['brand']}")
-    if s.get("price_max"):  parts.append(f"under ${s['price_max']}")
-    if s.get("gender"):     parts.append(f"for {s['gender']}")
-    if s.get("use_case"):   parts.append(f"for {s['use_case']}")
-    if s.get("color"):      parts.append(f"color: {s['color']}")
-    if s.get("features"):   parts.append(", ".join(s["features"]))
-    return " | ".join(parts) if parts else "general shopping"
+    if slots.category:  parts.append(slots.category)
+    if slots.brand:     parts.append(slots.brand)
+    if slots.gender:    parts.append(slots.gender)
+    if slots.use_case:  parts.append(slots.use_case)
+    if slots.color:     parts.append(slots.color)
+    if slots.material:  parts.append(slots.material)
+    if slots.style:     parts.append(slots.style)
+    if slots.size:      parts.append(slots.size)
+    parts.extend(slots.features or [])
+    if state.last_query:
+        parts.append(state.last_query)
+
+    pref_query = " ".join(parts).strip()
+    if not pref_query:
+        return [p for p in candidates if p.get("parent_asin") not in rejected][:top_k]
+
+    # Encode once
+    q_vec = self.catalog.encoder.encode(
+        pref_query, normalize_embeddings=True, convert_to_numpy=True
+    ).astype(np.float32)
+
+    scored = []
+    for rank, p in enumerate(candidates):
+        asin = p.get("parent_asin", "")
+        if asin in rejected:
+            continue
+        idx = self.catalog.asin_to_idx.get(asin)
+        sim = float(self.catalog.embeddings[idx] @ q_vec) if idx is not None else 0.0
+        gender_adj = 0.0
+        if slots.gender:
+            prod_gender = Product.from_dict(p).gender_from_details()
+            if prod_gender == slots.gender:
+                gender_adj = 0.10
+            elif prod_gender and prod_gender != slots.gender:
+                gender_adj = -0.15
+        rating_bonus = ((p.get("average_rating") or 0.0) / 5.0) * 0.02
+        scored.append((sim + gender_adj + rating_bonus, rank, p))
+
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return [p for _, _, p in scored[:top_k]]
 ```
-
-### Without LLM (Heuristic Fallback)
-
-```python
-def heuristic_rerank(candidates: list[dict], state: ConversationState, top_k: int = 10) -> list[dict]:
-    """
-    Score each product by how well it matches user slots.
-    Totally deterministic, no LLM needed.
-    """
-    def score(product: dict) -> float:
-        s = state.slots
-        total = 0.0
-
-        # Category match (most important)
-        if s.get("category"):
-            if _category_match(product, s["category"]):
-                total += 5.0
-
-        # Brand/store match ("store" is the brand field in this dataset)
-        if s.get("brand"):
-            if s["brand"].lower() in product.get("store", "").lower():
-                total += 3.0
-
-        # Price constraint (HARD — violating it gives a heavy penalty)
-        price = product.get("price") or 0.0
-        if s.get("price_max") and price > 0:
-            if price <= s["price_max"]:
-                total += 2.0
-            else:
-                total -= 10.0   # heavy penalty for over-budget
-
-        # Rating bonus (prefer popular products) — field is "average_rating" not "rating"
-        total += (product.get("average_rating") or 0.0) * 0.5
-
-        # Review count bonus (log-scale, cap at 1.0) — field is "rating_number" not "rating_count"
-        import math
-        count = product.get("rating_number") or 0
-        total += min(math.log10(count + 1) * 0.3, 1.0)
-
-        # Penalize rejected products
-        if product.get("parent_asin") in state.rejected_asins:
-            total -= 100.0
-
-        return total
 
     return sorted(candidates, key=score, reverse=True)[:top_k]
 
