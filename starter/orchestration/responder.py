@@ -65,56 +65,61 @@ def _search_message(ranked_products: list[dict]) -> str:
   )
 
 
-def format_response(
-  ranked_products: list[dict],
-  action: str,
-  clarification_question: Optional[str] = None,
-  asked_slot: Optional[str] = None,
-  prompt_tokens: int = 0,
-  completion_tokens: int = 0,
-) -> dict:
-  """Format one evaluator-compatible response without mutating session state.
+class Responder:
+  def __init__(self, llm_client=None) -> None:
+    self.llm_client = llm_client
 
-  ``CLARIFY`` asks one structured question and returns no products.
-  ``SEARCH`` returns ranked recommendations. ``SEARCH_AND_CLARIFY`` does both
-  in the same turn, so a miss produces a useful simulator reply next turn.
-  """
-  # The evaluator only accepts non-negative integer usage values.
-  usage = {
-    "prompt_tokens": max(0, int(prompt_tokens)),
-    "completion_tokens": max(0, int(completion_tokens)),
-  }
+  def format_response(
+    self,
+    ranked_products: list[dict],
+    action: str,
+    clarification_question: Optional[str] = None,
+    asked_slot: Optional[str] = None,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+  ) -> dict:
+    """Format one evaluator-compatible response without mutating session state.
 
-  if action == "CLARIFY":
-    return {
-      "message": clarification_question or "Could you tell me more about what you're looking for?",
-      "ask_attribute": _ask_attribute(asked_slot),
-      "recommendations": [],
-      "usage": usage,
+    ``CLARIFY`` asks one structured question and returns no products.
+    ``SEARCH`` returns ranked recommendations. ``SEARCH_AND_CLARIFY`` does both
+    in the same turn, so a miss produces a useful simulator reply next turn.
+    """
+    # The evaluator only accepts non-negative integer usage values.
+    usage = {
+      "prompt_tokens": max(0, int(prompt_tokens)),
+      "completion_tokens": max(0, int(completion_tokens)),
     }
 
-  if action in {"SEARCH_CLARIFY", "SEARCH_AND_CLARIFY"}:
-    question = clarification_question or "Could you tell me more about what you're looking for?"
+    if action == "CLARIFY":
+      return {
+        "message": clarification_question or "Could you tell me more about what you're looking for?",
+        "ask_attribute": _ask_attribute(asked_slot),
+        "recommendations": [],
+        "usage": usage,
+      }
+
+    if action in {"SEARCH_CLARIFY", "SEARCH_AND_CLARIFY"}:
+      question = clarification_question or "Could you tell me more about what you're looking for?"
+      return {
+        "message": f"{_search_message(ranked_products)} {question}",
+        "ask_attribute": _ask_attribute(asked_slot),
+        "recommendations": _recommendations(ranked_products),
+        "usage": usage,
+      }
+
+    if action == "FALLBACK":
+      return {
+        "message": "I couldn't find products matching your criteria. Try relaxing a constraint.",
+        "ask_attribute": None,
+        "recommendations": [],
+        "usage": usage,
+      }
+
+    # Treat SEARCH and an unknown action as a search response rather than
+    # returning malformed output to the evaluator.
     return {
-      "message": f"{_search_message(ranked_products)} {question}",
-      "ask_attribute": _ask_attribute(asked_slot),
+      "message": _search_message(ranked_products),
+      "ask_attribute": None,
       "recommendations": _recommendations(ranked_products),
       "usage": usage,
     }
-
-  if action == "FALLBACK":
-    return {
-      "message": "I couldn't find products matching your criteria. Try relaxing a constraint.",
-      "ask_attribute": None,
-      "recommendations": [],
-      "usage": usage,
-    }
-
-  # Treat SEARCH and an unknown action as a search response rather than
-  # returning malformed output to the evaluator.
-  return {
-    "message": _search_message(ranked_products),
-    "ask_attribute": None,
-    "recommendations": _recommendations(ranked_products),
-    "usage": usage,
-  }

@@ -9,7 +9,7 @@ from starter.orchestration.orchestration import (
     build_query,
     generate_clarification,
 )
-from starter.orchestration.responder import format_response
+from starter.orchestration.responder import Responder
 from starter.orchestration.orchestration import Orchestrator
 from interfaces import (
     ConversationState,
@@ -18,6 +18,10 @@ from interfaces import (
     rerank,
     update_state,
 )
+
+from catalog import Catalog
+from retrieval import RetrievalPipeline
+
 
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
@@ -58,13 +62,11 @@ class Agent:
 
         self.retrieval    = RetrievalPipeline(self.catalog)
         self.orchestrator = Orchestrator()
-        self.reranker     = LLMReranker(llm_client)
         self.responder    = Responder(llm_client)
         self.llm          = llm_client
 
         self._sessions: set[str] = set()
         self._states: dict[str, ConversationState] = {}
-        self._memories: dict[str, SessionMemory] = {}
         self.state = None
         self.memory = None
 
@@ -76,11 +78,9 @@ class Agent:
             user_profile=dict(user_profile or {}),
         )
         self._states[session_id] = state
-        self._memories[session_id] = SessionMemory()
         # Keep these aliases for callers that inspect the most recently reset
         # session, while respond() always uses the requested session ID.
         self.state = state
-        self.memory = self._memories[session_id]
 
     def respond(
         self,
@@ -112,7 +112,7 @@ class Agent:
                      if slot not in previously_asked and slot in state.asked_clarifications),
                     decision.missing_slots[0] if decision.missing_slots else None,
                 )
-                return format_response([], "CLARIFY", question, asked_slot=asked)
+                return self.responder.format_response([], "CLARIFY", question, asked_slot=asked)
             else:
                 decision.action = "SEARCH"
 
@@ -134,12 +134,12 @@ class Agent:
                             if slot not in previously_asked and slot in state.asked_clarifications),
                            decision.missing_slots[0] if decision.missing_slots else None,
                        )
-                       return format_response(
+                       return self.responder.format_response(
                            ranked, "SEARCH_AND_CLARIFY", question,
                            asked_slot=asked,
                        )
-               return format_response(ranked, "SEARCH")
+               return self.responder.format_response(ranked, "SEARCH")
 
-        return format_response([], "FALLBACK")
+        return self.responder.format_response([], "FALLBACK")
 
 
