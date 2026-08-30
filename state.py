@@ -76,10 +76,6 @@ _BUDGET_RE = re.compile(r"\$\s*(\d+(?:\.\d{1,2})?)")
 _GENDER_VALUE_RE = re.compile(r"^department\s*:\s*(.+)$", re.I)
 _BRAND_VALUE_RE = re.compile(r"^brand\s*:\s*(.+)$", re.I)
 _SIZE_VALUE_RE = re.compile(r"^(?:size|sizing|width)\s*:\s*(.+)$", re.I)
-_CATEGORY_GENDER_RE = re.compile(r"\b(women'?s?|female|ladies|girl'?s?)\b", re.I)
-_CATEGORY_MALE_RE = re.compile(r"\b(men'?s?|male|boy'?s?)\b", re.I)
-_CATEGORY_USE_CASE_RE = re.compile(r"\b(hiking|running|gym|outdoor|work|winter|training|yoga|cycling)\b", re.I)
-_CATEGORY_MATERIAL_RE = re.compile(r"\b(leather|cotton|denim|wool|suede|canvas|nylon|polyester)\b", re.I)
 
 # ask_attribute names the user may say they have no preference for — mirrors
 # evaluator ALLOWED_ATTRIBUTES.
@@ -91,7 +87,6 @@ ALLOWED_ATTRIBUTES = {
 _ATTR_TO_SLOTS = {
     "budget": ["price_max", "price_min"],
     "feature": ["features"],
-    "other": ["gender"],
 }
 
 
@@ -102,7 +97,6 @@ _META_MESSAGE_KINDS = {
     MessageKind.NO_PREFERENCE,
     MessageKind.BOUNDARY_NO_PREFERENCE,
     MessageKind.REJECTION,
-    MessageKind.NO_ANSWER,
 }
 
 
@@ -119,31 +113,6 @@ def _distinct_words(words: list[str]) -> list[str]:
         if lowered not in seen:
             seen.append(lowered)
     return seen
-
-
-def _extract_slots_from_category(s: "ManagedState", category: str, turn: int) -> None:
-    """Extract gender/use_case/material directly from the category phrase on turn 1.
-
-    Prevents the orchestrator from wasting a clarification turn asking about
-    attributes that are already unambiguously stated in the first message.
-    """
-    low = category.lower()
-    assignments: dict[str, Any] = {}
-    if not s.slots.gender:
-        if _CATEGORY_GENDER_RE.search(low):
-            assignments["gender"] = "women"
-        elif _CATEGORY_MALE_RE.search(low):
-            assignments["gender"] = "men"
-    if not s.slots.use_case:
-        m = _CATEGORY_USE_CASE_RE.search(low)
-        if m:
-            assignments["use_case"] = m.group(1).lower()
-    if not s.slots.material:
-        m = _CATEGORY_MATERIAL_RE.search(low)
-        if m:
-            assignments["material"] = m.group(1).lower()
-    if assignments:
-        _apply_disclosure(s, turn, "category_inferred", category, assignments, [])
 
 
 def constraint_to_slots(constraint: str) -> tuple[dict[str, Any], list[str]]:
@@ -385,7 +354,6 @@ def update_state(state: ConversationState, message: str) -> ManagedState:
         if kind is MessageKind.INITIAL_BUYING:
             if fields.get("category"):
                 s.slots.category = fields["category"]
-                _extract_slots_from_category(s, fields["category"], turn)
             if fields.get("constraint"):
                 scalars, feats = constraint_to_slots(fields["constraint"])
                 _apply_disclosure(s, turn, "initial_hard", fields["constraint"], scalars, feats)
@@ -393,12 +361,10 @@ def update_state(state: ConversationState, message: str) -> ManagedState:
         elif kind is MessageKind.INITIAL_BROWSING:
             if fields.get("category"):
                 s.slots.category = fields["category"]
-                _extract_slots_from_category(s, fields["category"], turn)
 
         elif kind is MessageKind.INITIAL_OVERRIDE:
             if fields.get("category"):
                 s.slots.category = fields["category"]
-                _extract_slots_from_category(s, fields["category"], turn)
             if fields.get("constraint"):
                 scalars, feats = constraint_to_slots(fields["constraint"])
                 _apply_disclosure(s, turn, "initial_soft", fields["constraint"], scalars, feats)
