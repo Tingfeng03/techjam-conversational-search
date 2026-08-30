@@ -11,13 +11,8 @@ from starter.orchestration.orchestration import (
 )
 from starter.orchestration.responder import Responder
 from starter.orchestration.orchestration import Orchestrator
-from interfaces import (
-    ConversationState,
-    estimate_result_count,
-    retrieve,
-    rerank,
-    update_state,
-)
+from interfaces import ConversationState
+from state import estimate_result_count, update_state
 
 from catalog import Catalog
 from retrieval import RetrievalPipeline
@@ -92,7 +87,11 @@ class Agent:
         if session_id not in self._sessions:
             raise RuntimeError("reset must be called before respond")
 
-        state = update_state(self._states[session_id], user_message)
+        # The real state implementation uses turn_count while parsing (notably
+        # for intent overrides), so set it on the input state first.
+        current_state = self._states[session_id]
+        current_state.turn_count = turn
+        state = update_state(current_state, user_message)
         # update_state may return a copied state, so apply evaluator metadata
         # after the update rather than relying on mutation.
         state.turn_count = turn
@@ -120,11 +119,12 @@ class Agent:
                query = build_query(state)
                filters = build_filters(state)
                limit = max(0, min(int(top_k), 10))
-               candidates = retrieve(
+               candidates = self.retrieval.retrieve(
                    query, filters, top_k=50,
                    buying_mode=(state.intent == "BUYING"),
+                   category=state.slots.category,
                )
-               ranked = rerank(candidates, state, top_k=limit)
+               ranked = self.retrieval.rerank(candidates, state, top_k=limit)
                if decision.action == "SEARCH_AND_CLARIFY":
                    previously_asked = set(state.asked_clarifications)
                    question = generate_clarification(decision.missing_slots, state)
