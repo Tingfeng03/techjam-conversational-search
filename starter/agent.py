@@ -10,6 +10,14 @@ from starter.orchestration.orchestration import (
     generate_clarification,
 )
 from starter.orchestration.responder import format_response
+from starter.orchestration.orchestration import Orchestrator
+from interfaces import (
+    ConversationState,
+    estimate_result_count,
+    retrieve,
+    rerank,
+    update_state,
+)
 
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
@@ -44,8 +52,9 @@ class Agent:
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
         self.catalog = Catalog(catalog_path)
 
-        # TODO: load llm using config
-        llm_client = 
+        # The baseline is deliberately model-free.  A model client can be
+        # injected by a future implementation without changing the protocol.
+        llm_client = None
 
         self.retrieval    = RetrievalPipeline(self.catalog)
         self.orchestrator = Orchestrator()
@@ -53,15 +62,25 @@ class Agent:
         self.responder    = Responder(llm_client)
         self.llm          = llm_client
 
+        self._sessions: set[str] = set()
+        self._states: dict[str, ConversationState] = {}
+        self._memories: dict[str, SessionMemory] = {}
         self.state = None
         self.memory = None
-        self.reset()
 
     def reset(self, session_id: str, user_profile: dict) -> None:
         # The profile is anonymized and may be used for personalization.
         self._sessions.add(session_id)
-        self.state = ConversationState()
-        self.memory = SessionMemory()
+        state = ConversationState(
+            session_id=session_id,
+            user_profile=dict(user_profile or {}),
+        )
+        self._states[session_id] = state
+        self._memories[session_id] = SessionMemory()
+        # Keep these aliases for callers that inspect the most recently reset
+        # session, while respond() always uses the requested session ID.
+        self.state = state
+        self.memory = self._memories[session_id]
 
     def respond(
         self,
@@ -73,27 +92,54 @@ class Agent:
         if session_id not in self._sessions:
             raise RuntimeError("reset must be called before respond")
 
-        self.state.turn_count = turn  
+        state = update_state(self._states[session_id], user_message)
+        # update_state may return a copied state, so apply evaluator metadata
+        # after the update rather than relying on mutation.
+        state.turn_count = turn
+        self._states[session_id] = state
+        self.state = state
 
-        self.state = update_state(self.state, user_message)
+        est = estimate_result_count(state, self.catalog)
 
-        est = estimate_result_count(self.state, self.catalog)
-
-        decision = decide(self.state, est)
+        decision = self.orchestrator.decide(state, est)
 
         if decision.action == "CLARIFY":
-            question = generate_clarification(decision.missing_slots, self.state)
+            previously_asked = set(state.asked_clarifications)
+            question = generate_clarification(decision.missing_slots, state)
             if question:
-                asked = decision.missing_slots[0]
+                asked = next(
+                    (slot for slot in decision.missing_slots
+                     if slot not in previously_asked and slot in state.asked_clarifications),
+                    decision.missing_slots[0] if decision.missing_slots else None,
+                )
                 return format_response([], "CLARIFY", question, asked_slot=asked)
             else:
                 decision.action = "SEARCH"
 
-        if decision.action == "SEARCH":
-               query      = build_query(self.state)
-               filters    = build_filters(self.state)
-               candidates = retrieve(query, filters, top_k=50, buying_mode=(self.state.intent == "BUYING"))
-               ranked     = rerank(candidates, self.state, top_k=10)    
-               return format_response(ranked, "SEARCH")          
+        if decision.action in {"SEARCH", "SEARCH_AND_CLARIFY"}:
+               query = build_query(state)
+               filters = build_filters(state)
+               limit = max(0, min(int(top_k), 10))
+               candidates = retrieve(
+                   query, filters, top_k=50,
+                   buying_mode=(state.intent == "BUYING"),
+               )
+               ranked = rerank(candidates, state, top_k=limit)
+               if decision.action == "SEARCH_AND_CLARIFY":
+                   previously_asked = set(state.asked_clarifications)
+                   question = generate_clarification(decision.missing_slots, state)
+                   if question:
+                       asked = next(
+                           (slot for slot in decision.missing_slots
+                            if slot not in previously_asked and slot in state.asked_clarifications),
+                           decision.missing_slots[0] if decision.missing_slots else None,
+                       )
+                       return format_response(
+                           ranked, "SEARCH_AND_CLARIFY", question,
+                           asked_slot=asked,
+                       )
+               return format_response(ranked, "SEARCH")
+
+        return format_response([], "FALLBACK")
 
 

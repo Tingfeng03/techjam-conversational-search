@@ -20,10 +20,18 @@ def generate_clarification(missing_slots: list[str], state: ConversationState) -
   for slot in missing_slots:
     if slot not in state.asked_clarifications:
       template = CLARIFICATION_QUESTIONS.get(slot, f"Could you tell me more about the {slot} you prefer?")
-      question = template.format(**state.slots)
+      # Slots is a dataclass, not a mapping.  Use all attributes so templates
+      # remain safe even when the referenced value has not been filled yet.
+      values = vars(state.slots)
+      question = template.format_map(_MissingSlotValues(values))
       state.asked_clarifications.add(slot)
       return question
   return None 
+
+
+class _MissingSlotValues(dict):
+  def __missing__(self, key: str) -> str:
+    return ""
 
 
 def build_query(state: ConversationState) -> str:

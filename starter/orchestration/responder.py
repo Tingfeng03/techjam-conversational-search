@@ -93,7 +93,7 @@ def format_response(
       "usage": usage,
     }
 
-  if action == "SEARCH_CLARIFY":
+  if action in {"SEARCH_CLARIFY", "SEARCH_AND_CLARIFY"}:
     question = clarification_question or "Could you tell me more about what you're looking for?"
     return {
       "message": f"{_search_message(ranked_products)} {question}",
