@@ -209,6 +209,40 @@ class UpdateStateTest(unittest.TestCase):
         self.assertEqual(s.history[-1]["role"], "user")
         self.assertIn("still exploring", s.history[-1]["content"])
 
+    def test_last_query_tracks_content_messages(self):
+        s = new_state("s9")
+        s = self._turn(s, "I'm looking for Athletic Shoes. A key requirement is: leather.", 1)
+        self.assertIn("Athletic Shoes", s.last_query)
+        s = self._turn(s, "For that, what matters is: color: blue.", 2)
+        self.assertIn("color: blue", s.last_query)
+
+    def test_last_query_kept_on_no_preference(self):
+        s = new_state("s10")
+        s = self._turn(s, "I'm looking for Athletic Shoes. A key requirement is: leather.", 1)
+        first = s.last_query
+        s = self._turn(s, "I don't have an additional preference for budget.", 2)
+        self.assertEqual(s.last_query, first)  # meta message does not pollute
+
+    def test_no_preference_maps_attribute_to_slots(self):
+        s = new_state("s11")
+        s = self._turn(s, "I'm looking for Dresses, but I'm still exploring.", 1)
+        s = self._turn(s, "I don't have an additional preference for budget.", 2)
+        self.assertIn("budget", s.asked_clarifications)
+        self.assertIn("price_max", s.asked_clarifications)  # orchestrator checks slots
+        self.assertIn("price_min", s.asked_clarifications)
+
+    def test_no_preference_feature_maps_to_features(self):
+        s = new_state("s12")
+        s = self._turn(s, "I'm looking for Dresses, but I'm still exploring.", 1)
+        s = self._turn(s, "I don't have a preference for feature; please use your judgment.", 2)
+        self.assertIn("features", s.asked_clarifications)
+
+    def test_boundary_no_preference_maps_slots(self):
+        s = new_state("s13")
+        s = self._turn(s, "I don't have a preference for budget; please use your judgment.", 1)
+        self.assertIn("price_max", s.asked_clarifications)
+        self.assertIn("price_min", s.asked_clarifications)
+
 
 class EstimateResultCountTest(unittest.TestCase):
     def setUp(self):
