@@ -15,6 +15,7 @@ from starter.orchestration.orchestration import (
     Orchestrator,
     build_filters,
     build_query,
+    build_hyde_query,
     generate_clarification,
 )
 from starter.orchestration.responder import Responder
@@ -63,11 +64,13 @@ class Agent:
 
         if decision.action in ("SEARCH", "SEARCH_AND_CLARIFY"):
             query = build_query(state)
+            hyde_query = build_hyde_query(state)
             filters = build_filters(state)
             candidates = self.retrieval.retrieve(
                 query, filters, top_k=100,
                 buying_mode=(state.intent == "BUYING"),
                 category=state.slots.category,
+                hyde_query=hyde_query,
             )
             ranked = self.retrieval.rerank(candidates, state, top_k=10)
             state.last_candidates = ranked

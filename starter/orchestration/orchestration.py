@@ -96,6 +96,53 @@ def build_query(state: ConversationState) -> str:
   return " ".join(unique_parts) if unique_parts else "clothing shoes jewelry"
 
 
+def build_hyde_query(state: ConversationState) -> str:
+  """Build a product-title-style phrase for vector search.
+
+  Produces natural phrasing (e.g. "Nike women's blue cotton shoes for running")
+  rather than a keyword bag, which better matches how catalog product titles
+  are written and how sentence-transformers embed them.
+  Falls back to build_query() when no slots are filled.
+  """
+  slots = state.slots
+  phrase: list[str] = []
+
+  if slots.brand:
+    phrase.append(slots.brand)
+
+  if slots.gender:
+    g = slots.gender.lower()
+    if g in ("men", "man", "male"):
+      phrase.append("men's")
+    elif g in ("women", "woman", "female"):
+      phrase.append("women's")
+    else:
+      phrase.append(slots.gender)
+
+  for val in (slots.color, slots.material, slots.style):
+    if isinstance(val, str) and val.strip():
+      phrase.append(val.strip())
+
+  if slots.category:
+    phrase.append(slots.category)
+
+  if slots.use_case:
+    phrase.append(f"for {slots.use_case}")
+
+  if slots.size:
+    phrase.append(f"size {slots.size}")
+
+  for feat in (slots.features or [])[:2]:
+    if isinstance(feat, str) and feat.strip():
+      phrase.append(feat.strip())
+
+  if isinstance(state.last_query, str) and state.last_query.strip():
+    phrase.append(state.last_query.strip())
+
+  result = " ".join(dict.fromkeys(p for p in phrase if p))
+  return result.strip() or build_query(state)
+
+
 def build_filters(state: ConversationState) -> Filters:
   """Extract hard, structured constraints for retrieval.
 
@@ -218,21 +265,8 @@ def _profile_multiplier(state: ConversationState, attribute: str) -> float:
 
 
 class Orchestrator:
-  """Choose when to search, then rank questions from visible candidates."""
-
-  TURN_FORCE_SEARCH = 10
-  CANDIDATE_OVERLOAD_THRESHOLD = 500
-  MIN_ATTRIBUTE_COVERAGE = 0.20
-
-  def __init__(self, answer_priors: Mapping[str, float] | None = None) -> None:
-    self.answer_priors: dict[str, float] = {}
-    for attribute, value in (answer_priors or {}).items():
-      try:
-        number = float(value)
-      except (TypeError, ValueError):
-        continue
-      if math.isfinite(number) and number >= 0:
-        self.answer_priors[str(attribute)] = number
+  TURN_FORCE_SEARCH = 6  # always search when turn >= this threshold
+  CANDIDATE_OVERLOAD_THRESHOLD = 150  # too many results, so clarify
 
   def decide(
     self,
@@ -240,15 +274,35 @@ class Orchestrator:
     estimated_candidates: int,
   ) -> OrchestratorDecision:
 
-    if not state.slots.category:
+    if state.turn_count >= self.TURN_FORCE_SEARCH:
       return OrchestratorDecision(
-        action="CLARIFY", missing_slots=["category"], reason="no_searchable_category",
+        action="SEARCH",
+        reason="near_limit",
+        diverse=(state.intent == "BROWSING")
       )
     if state.turn_count >= self.TURN_FORCE_SEARCH:
       return OrchestratorDecision(
-        action="SEARCH", reason="turn_limit", diverse=(state.intent == "BROWSING"),
+          action="CLARIFY",
+          missing_slots=["category"],
+          reason="no_searchable_category"
       )
-    breadth = "broad" if estimated_candidates > self.CANDIDATE_OVERLOAD_THRESHOLD else "specific"
+
+    unasked = self._get_priority_missing_slots(state)
+
+    # In buying mode with a hard constraint already disclosed, search sooner.
+    threshold = self.CANDIDATE_OVERLOAD_THRESHOLD
+    if state.intent == "BUYING" and (state.slots.brand or state.slots.price_max):
+      threshold = 500
+
+    # searchable request, but too broad — search and ask one more question
+    if (estimated_candidates > threshold and unasked):
+      return OrchestratorDecision(
+          action="SEARCH_AND_CLARIFY",
+          missing_slots=unasked,
+          reason="searchable_but_broad",
+          diverse=(state.intent == "BROWSING")
+      )
+
     return OrchestratorDecision(
       action="SEARCH_AND_CLARIFY",
       reason=f"search_then_adapt:{breadth}",
@@ -324,9 +378,9 @@ class Orchestrator:
         "price_max",
         "gender",
         "brand",
-        "size",
-        "material",
         "color",
+        "material",
+        "size",
       ]
 
     return [
