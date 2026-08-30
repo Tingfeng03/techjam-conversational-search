@@ -1,22 +1,22 @@
 from __future__ import annotations
 
-import json
-import re
-import sqlite3
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from pathlib import Path
+
+from catalog import Catalog
+from retrieval import RetrievalPipeline
+from state import new_state, update_state, estimate_result_count
 from starter.orchestration.orchestration import (
+    Orchestrator,
     build_filters,
     build_query,
     generate_clarification,
 )
-from starter.orchestration.responder import Responder
-from starter.orchestration.orchestration import Orchestrator
-from interfaces import ConversationState
-from state import estimate_result_count, update_state
-
-from catalog import Catalog
-from retrieval import RetrievalPipeline
-
+from starter.orchestration.responder import format_response
 
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
@@ -46,8 +46,6 @@ def _terms(text: str) -> list[str]:
 
 
 class Agent:
-    """Editable weak baseline: stateless BM25 retrieval with no LLM dependency."""
-
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
         self.catalog = Catalog(catalog_path)
 
@@ -77,13 +75,7 @@ class Agent:
         # session, while respond() always uses the requested session ID.
         self.state = state
 
-    def respond(
-        self,
-        session_id: str,
-        user_message: str,
-        turn: int,
-        top_k: int,
-    ) -> dict:
+    def respond(self, session_id, user_message, turn, top_k) -> dict:
         if session_id not in self._sessions:
             raise RuntimeError("reset must be called before respond")
 
@@ -142,4 +134,4 @@ class Agent:
 
         return self.responder.format_response([], "FALLBACK")
 
-
+        return format_response([], "SEARCH")
