@@ -74,9 +74,19 @@ class Agent:
             self._states[session_id] = state
 
             if decision.action == "SEARCH_AND_CLARIFY":
+                # Question selection happens after retrieval so it can use the
+                # actual candidate set shown to the user.  This keeps
+                # orchestration independent of the retrieval implementation
+                # while making clarification genuinely adaptive.
+                decision.missing_slots = self.orchestrator.rank_clarifications(
+                    state, ranked,
+                )
                 previously_asked = set(state.asked_clarifications)
                 question = generate_clarification(decision.missing_slots, state)
                 if question:
+                    decision.reason = self.orchestrator.clarification_diagnostic(
+                        state, ranked, decision.missing_slots[0],
+                    )
                     asked = next(
                         (slot for slot in decision.missing_slots
                          if slot not in previously_asked and slot in state.asked_clarifications),
