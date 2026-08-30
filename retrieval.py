@@ -33,11 +33,98 @@ To use from agent.py:
 
 from __future__ import annotations
 
+import re
+
 import bm25s
 import numpy as np
 
 from catalog import Catalog
 from interfaces import ConversationState, Filters, Product
+
+_COLOR_RE = re.compile(
+    r"\b(black|white|blue|red|pink|green|brown|gray|grey|purple|yellow|orange|"
+    r"silver|gold|beige|navy|cream|burgundy|teal|maroon|ivory|coral|olive|tan)\b",
+    re.I,
+)
+_MATERIAL_RE = re.compile(
+    r"\b(cotton|polyester|nylon|leather|wool|spandex|silk|rayon|fabric|"
+    r"denim|suede|canvas|linen|fleece|satin|velvet|rubber|mesh|Gore-Tex|synthetic)\b",
+    re.I,
+)
+
+
+def _searchable_text(product: dict) -> str:
+    title = product.get("title") or ""
+    store = product.get("store") or ""
+    feats = " ".join((product.get("features") or [])[:5])
+    cats = " ".join((product.get("categories") or [])[:3])
+    desc = " ".join((product.get("description") or [])[:2])
+    details = product.get("details") or {}
+    dept = details.get("Department") or ""
+    brand = details.get("Brand") or ""
+    return f"{title} {store} {brand} {dept} {feats} {cats} {desc}".lower()
+
+
+def _structural_score(product: dict, state: ConversationState) -> float:
+    slots = state.slots
+    text = _searchable_text(product)
+    score = 0.0
+    matched = 0
+
+    if slots.brand:
+        brand_low = slots.brand.lower()
+        store_low = (product.get("store") or "").lower()
+        details_brand = ((product.get("details") or {}).get("Brand") or "").lower()
+        if brand_low in store_low or brand_low in details_brand:
+            score += 0.25
+            matched += 1
+
+    if slots.color:
+        if slots.color.lower() in text:
+            score += 0.20
+            matched += 1
+
+    if slots.material:
+        if slots.material.lower() in text:
+            score += 0.20
+            matched += 1
+
+    if slots.gender:
+        prod_gender = Product.from_dict(product).gender_from_details()
+        if prod_gender == slots.gender.lower():
+            score += 0.20
+            matched += 1
+
+    if slots.price_max is not None or slots.price_min is not None:
+        safe_price = Product._safe_price(product.get("price"))
+        if safe_price is not None:
+            in_range = True
+            if slots.price_max is not None and safe_price > slots.price_max:
+                in_range = False
+            if slots.price_min is not None and safe_price < slots.price_min:
+                in_range = False
+            if in_range:
+                score += 0.15
+                matched += 1
+
+    if slots.use_case:
+        if slots.use_case.lower() in text:
+            score += 0.15
+            matched += 1
+
+    if slots.size:
+        if slots.size.lower() in text:
+            score += 0.10
+            matched += 1
+
+    for feat in (slots.features or []):
+        if feat.lower() in text:
+            score += 0.10
+            matched += 1
+        if matched >= 8:
+            break
+
+    return score
 
 # 200 gives each arm enough breadth to catch products that rank poorly in one method
 # but highly in the other. After RRF fusion the combined list is still cut to top_k (50),
@@ -110,36 +197,13 @@ class RetrievalPipeline:
         state: ConversationState,
         top_k: int = 10,
     ) -> list[dict]:
-        """
-        Two-pass reranking pipeline:
-
-        Pass 1 — bi-encoder dot product (fast, covers all candidates):
-          Build a preference query from all accumulated slots, encode once,
-          score each candidate via cosine similarity to its pre-computed vector.
-          Gender structural field and rating tiebreaker applied here.
-          Output: top_k candidates, best-first.
-
-        Pass 2 — cross-encoder rerank (accurate, top_k candidates only):
-          Feed (preference_query, product_text) pairs through a cross-encoder.
-          The model reads query and document together — it can spot mismatches
-          that a bi-encoder misses because bi-encoders encode independently.
-          Output: same top_k candidates, better-ordered.
-
-        Returns up to top_k products, best first.
-        """
+        """Three-pass reranking: structural match → bi-encoder → cross-encoder."""
         if not candidates:
             return []
 
         rejected = set(state.rejected_asins or [])
         slots = state.slots
 
-        # Build a preference query from every accumulated slot.
-        # This is richer than the retrieval query, which only used the current turn's text.
-        # By the time rerank() is called, the agent may have extracted brand, gender, color,
-        # material etc. across multiple turns — concatenating them all gives the transformer
-        # a full picture of what the user wants, not just what they said most recently.
-        # last_query is appended too because it may contain signals (e.g. "cozy", "gift")
-        # that haven't been parsed into a slot yet.
         parts: list[str] = []
         if slots.category:  parts.append(slots.category)
         if slots.brand:     parts.append(slots.brand)
@@ -158,16 +222,10 @@ class RetrievalPipeline:
 
         pref_query = " ".join(parts).strip()
 
-        # If no slots have been filled yet, fall back to retrieval order
         if not pref_query:
             non_rejected = [p for p in candidates if p.get("parent_asin") not in rejected]
             return non_rejected[:top_k]
 
-        # Encode the preference query once and reuse it for all candidates.
-        # The alternative — encoding each candidate individually — would cost one
-        # transformer forward pass per candidate (50 calls vs 1). Product embeddings
-        # are already pre-computed in catalog.embeddings, so we only ever need to
-        # encode the query side at runtime.
         q_vec = self.catalog.encoder.encode(
             pref_query,
             normalize_embeddings=True,
@@ -176,6 +234,19 @@ class RetrievalPipeline:
 
         asin_to_idx = self.catalog.asin_to_idx
         gender = (slots.gender or "").lower()
+
+        filled_slots = sum(1 for v in (
+            slots.brand, slots.color, slots.material, slots.gender,
+            slots.use_case, slots.size,
+        ) if v) + (1 if slots.price_max or slots.price_min else 0) + min(len(slots.features or []), 2)
+
+        if filled_slots >= 3:
+            w_struct, w_sem, w_rating = 0.60, 0.30, 0.02
+        elif filled_slots >= 1:
+            w_struct, w_sem, w_rating = 0.40, 0.45, 0.02
+        else:
+            w_struct, w_sem, w_rating = 0.10, 0.70, 0.02
+
         scored: list[tuple[float, int, dict]] = []
 
         for rank, p in enumerate(candidates):
@@ -183,17 +254,11 @@ class RetrievalPipeline:
             if asin in rejected:
                 continue
 
-            # Both vectors are L2-normalised (done at build time in _compute_embeddings),
-            # so dot product equals cosine similarity without needing the full formula.
+            struct = _structural_score(p, state)
+
             idx = asin_to_idx.get(asin)
             sim = float(self.catalog.embeddings[idx] @ q_vec) if idx is not None else 0.0
 
-            # Gender is a binary structural attribute stored in details["Department"].
-            # The embedding model understands gender semantically but is inconsistent —
-            # a women's product might embed close to a men's query due to shared vocabulary.
-            # Reading the explicit field is more reliable for this one attribute.
-            # Penalty (-0.15) is larger than bonus (+0.10) because showing a wrong-gender
-            # product is a worse experience than missing a right-gender one.
             gender_adj = 0.0
             if gender:
                 prod_gender = Product.from_dict(p).gender_from_details()
@@ -202,32 +267,21 @@ class RetrievalPipeline:
                 elif prod_gender and prod_gender != gender:
                     gender_adj = -0.15
 
-            # Cosine similarity scores cluster in ~0.3–0.7, so 0.02 max is genuinely
-            # a tiebreaker — it only matters when two products are semantically identical.
-            rating_bonus = ((p.get("average_rating") or 0.0) / 5.0) * 0.02
+            rating_bonus = ((p.get("average_rating") or 0.0) / 5.0) * w_rating
 
-            score = sim + gender_adj + rating_bonus
-            # rank (original retrieval position) is stored so that products with identical
-            # floating-point scores sort deterministically rather than arbitrarily.
+            score = w_struct * struct + w_sem * (sim + gender_adj) + rating_bonus
             scored.append((score, rank, p))
 
         scored.sort(key=lambda x: (-x[0], x[1]))
-        pass1 = [p for _, _, p in scored[:top_k]]
+        pass2 = [p for _, _, p in scored[:30]]
 
-        # Pass 2: cross-encoder rerank over the top_k from pass 1.
-        # Cross-encoder reads (query, document) together — much more accurate than
-        # dot product for distinguishing near-identical candidates in the final list.
-        # We only run it on top_k (10) items, not the full 50, to keep latency low.
-        return self._cross_encoder_rerank(pref_query, pass1)
+        return self._cross_encoder_rerank(pref_query, pass2, top_k=top_k)
 
-    def _cross_encoder_rerank(self, query: str, candidates: list[dict]) -> list[dict]:
-        """Re-score candidates with the cross-encoder and return sorted by score."""
+    def _cross_encoder_rerank(self, query: str, candidates: list[dict], top_k: int = 10) -> list[dict]:
+        """Re-score candidates with the cross-encoder and return top_k sorted by score."""
         if not candidates:
             return candidates
 
-        # Build (query, product_text) pairs — cross-encoder needs both in one input.
-        # We use the same concise text as the embedding (_embed_text equivalent):
-        # title + store + top features + categories.
         pairs = []
         for p in candidates:
             title = p.get("title") or ""
@@ -241,7 +295,7 @@ class RetrievalPipeline:
 
         scores = self.catalog.cross_encoder.predict(pairs)
         ranked = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
-        return [p for _, p in ranked]
+        return [p for _, p in ranked[:top_k]]
 
     # ------------------------------------------------------------------
     # Internal helpers

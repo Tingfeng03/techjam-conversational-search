@@ -17,4 +17,15 @@ tests/test_5core_builder.py
 tests/test_organizer_pipeline.py
 *.log
 *.npy
-*venv
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Hugging Face model cache
+hf_cache/
+
+# IDE
+.vscode/
+.idea/

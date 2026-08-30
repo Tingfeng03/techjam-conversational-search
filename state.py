@@ -85,6 +85,7 @@ ALLOWED_ATTRIBUTES = {
 }
 
 
+
 # =============================================================================
 # Constraint → slot mapping
 # =============================================================================
@@ -325,7 +326,6 @@ def update_state(state: ConversationState, message: str) -> ManagedState:
     turn = _current_turn(s)
     raw_message = message or ""
     s.history.append({"role": "user", "content": raw_message})
-
     try:
         kind, fields = detect_message_type(raw_message)
         s.intent = classify_intent(raw_message, s.intent)

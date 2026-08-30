@@ -62,6 +62,9 @@ def build_query(state: ConversationState) -> str:
     if isinstance(feature, str) and feature.strip():
       parts.append(feature.strip())
 
+  if isinstance(state.last_query, str) and state.last_query.strip():
+    parts.append(state.last_query.strip())
+
   # Avoid accidentally overweighting a term mentioned in multiple slots.
   unique_parts = list(dict.fromkeys(parts))
   return " ".join(unique_parts) if unique_parts else "clothing shoes jewelry"
