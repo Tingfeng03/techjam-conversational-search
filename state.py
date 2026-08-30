@@ -84,6 +84,11 @@ ALLOWED_ATTRIBUTES = {
     "budget", "feature", "use_case", "other",
 }
 
+_ATTR_TO_SLOTS = {
+    "budget": ["price_max", "price_min"],
+    "feature": ["features"],
+}
+
 
 # Messages that carry no positive search signal. update_state keeps the
 # previous last_query on these so the reranker preference query is not
