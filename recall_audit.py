@@ -155,12 +155,9 @@ class AuditPipeline(RetrievalPipeline):
 
 class AuditAgent(Agent):
     def __init__(self, catalog_path="data/catalog.jsonl"):
-        from catalog import Catalog
-        self.catalog  = Catalog(catalog_path)
+        super().__init__(catalog_path)
         self.pipeline = AuditPipeline(self.catalog)
-        from starter.orchestration.orchestration import Orchestrator
-        self.orchestrator = Orchestrator()
-        self._sessions: dict[str, object] = {}
+        self.retrieval = self.pipeline
 
 
 # ---------------------------------------------------------------------------
