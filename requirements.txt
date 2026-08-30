@@ -1,0 +1,7 @@
+# Core retrieval
+numpy>=1.26
+bm25s>=0.2
+sentence-transformers>=3.0
+
+# Evaluation
+tqdm>=4.66
