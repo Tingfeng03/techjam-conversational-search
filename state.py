@@ -84,12 +84,7 @@ ALLOWED_ATTRIBUTES = {
     "budget", "feature", "use_case", "other",
 }
 
-# The evaluator and ask_attribute speak ATTRIBUTE names ("budget",
-# "feature") while the orchestrator missing-slot logic speaks SLOT names
-# ("price_max", "features"). When the user declines a clarification,
-# record the slot names too so Person 3 never re-asks a declined slot.
-# Every other attribute maps to a slot with the identical name.
-_ATTR_TO_SLOTS = {
+_ATTR_TO_SLOTS: dict[str, list[str]] = {
     "budget": ["price_max", "price_min"],
     "feature": ["features"],
 }
@@ -345,6 +340,8 @@ def update_state(state: ConversationState, message: str) -> ManagedState:
     turn = _current_turn(s)
     raw_message = message or ""
     s.history.append({"role": "user", "content": raw_message})
+    s.last_query = raw_message
+
     try:
         kind, fields = detect_message_type(raw_message)
         s.intent = classify_intent(raw_message, s.intent)
