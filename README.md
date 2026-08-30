@@ -2,6 +2,26 @@
 
 Build an AI shopping agent that asks useful follow-up questions and recommends the customer's hidden target product within at most 10 turns.
 
+## Installation
+
+Python 3.10 or later required.
+
+**Quick install (global):**
+```bash
+pip install -r requirements.txt
+```
+
+**Isolated install (recommended — won't affect your other projects):**
+```bash
+python3 -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+Note: `sentence-transformers` pulls in PyTorch automatically — first install is ~1GB.
+
+---
+
 ## What You Receive
 
 - A frozen catalog of 50,000 products from the `Clothing_Shoes_and_Jewelry` category of Amazon Reviews 2023.
