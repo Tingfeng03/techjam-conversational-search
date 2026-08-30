@@ -84,10 +84,6 @@ ALLOWED_ATTRIBUTES = {
     "budget", "feature", "use_case", "other",
 }
 
-_ATTR_TO_SLOTS: dict[str, list[str]] = {
-    "budget": ["price_max", "price_min"],
-    "feature": ["features"],
-}
 
 # Messages that carry no positive search signal. update_state keeps the
 # previous last_query on these so the reranker preference query is not
@@ -340,8 +336,6 @@ def update_state(state: ConversationState, message: str) -> ManagedState:
     turn = _current_turn(s)
     raw_message = message or ""
     s.history.append({"role": "user", "content": raw_message})
-    s.last_query = raw_message
-
     try:
         kind, fields = detect_message_type(raw_message)
         s.intent = classify_intent(raw_message, s.intent)
