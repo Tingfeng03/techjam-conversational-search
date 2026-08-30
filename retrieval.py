@@ -33,95 +33,13 @@ To use from agent.py:
 
 from __future__ import annotations
 
-import json
-import os
 import re
-import urllib.request
 
 import bm25s
 import numpy as np
 
 from catalog import Catalog
 from interfaces import ConversationState, Filters, Product
-
-# LLM reranker — activated only when an API key is set. Mirrors the pattern in state.py.
-_LLM_KEY   = os.environ.get("TECHJAM_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
-_LLM_BASE  = os.environ.get("TECHJAM_LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-_LLM_MODEL = os.environ.get("TECHJAM_LLM_MODEL", "gpt-4o-mini")
-
-_LLM_SYSTEM = (
-    "You are a shopping assistant reranker. Given a shopper's requirements and a list of products, "
-    "rank the products by how well they match ALL requirements. "
-    "Return ONLY a valid JSON array of parent_asin strings, best match first. "
-    "Include exactly the number of items requested. No explanation, no extra text."
-)
-
-
-def _llm_rerank(slot_summary: str, candidates: list[dict], top_k: int) -> list[dict] | None:
-    """Re-rank candidates using an LLM. Returns None on any failure (caller uses CE result)."""
-    if not _LLM_KEY or not candidates:
-        return None
-
-    asin_to_product = {p.get("parent_asin", ""): p for p in candidates}
-
-    product_list = []
-    for p in candidates:
-        price = Product._safe_price(p.get("price"))
-        details = p.get("details") or {}
-        detail_parts = []
-        for key in ("Department", "Brand", "Material", "Color", "Size"):
-            val = details.get(key)
-            if val:
-                detail_parts.append(f"{key}:{val}")
-        product_list.append({
-            "asin": p.get("parent_asin", ""),
-            "title": (p.get("title") or "")[:80],
-            "brand": p.get("store") or details.get("Brand") or "",
-            "price": f"${price:.2f}" if price else "",
-            "features": " | ".join((p.get("features") or [])[:3]),
-            "details": " ".join(detail_parts),
-        })
-
-    user_msg = (
-        f"Shopper requirements: {slot_summary}\n\n"
-        f"Products:\n{json.dumps(product_list)}\n\n"
-        f"Return the top {top_k} parent_asin values as a JSON array."
-    )
-
-    payload = {
-        "model": _LLM_MODEL,
-        "temperature": 0,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": _LLM_SYSTEM},
-            {"role": "user", "content": user_msg},
-        ],
-    }
-    try:
-        req = urllib.request.Request(
-            f"{_LLM_BASE}/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {_LLM_KEY}",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-        content = body["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
-        # Accept either {"asins": [...]} or a bare list or any key whose value is a list
-        if isinstance(parsed, list):
-            asins = parsed
-        elif isinstance(parsed, dict):
-            asins = next((v for v in parsed.values() if isinstance(v, list)), [])
-        else:
-            return None
-        result = [asin_to_product[a] for a in asins if a in asin_to_product]
-        return result[:top_k] if result else None
-    except Exception:
-        return None
 
 _COLOR_RE = re.compile(
     r"\b(black|white|blue|red|pink|green|brown|gray|grey|purple|yellow|orange|"
@@ -241,7 +159,6 @@ class RetrievalPipeline:
         top_k: int = 50,
         buying_mode: bool = False,
         category: str | None = None,
-        hyde_query: str | None = None,
     ) -> list[dict]:
         """
         Hybrid BM25 + vector retrieval with RRF fusion and hard filtering.
@@ -263,7 +180,7 @@ class RetrievalPipeline:
         allowed = self._get_category_indices(category) if category else None
 
         bm25_results = self._bm25_search(query, top_k=_ARM_TOP_K, allowed_indices=allowed)
-        vec_results = self._vector_search(hyde_query or query, top_k=_ARM_TOP_K, allowed_indices=allowed)
+        vec_results = self._vector_search(query, top_k=_ARM_TOP_K, allowed_indices=allowed)
 
         fused = self._rrf_merge(bm25_results, vec_results)
 
@@ -356,32 +273,9 @@ class RetrievalPipeline:
             scored.append((score, rank, p))
 
         scored.sort(key=lambda x: (-x[0], x[1]))
-        all_scored = [p for _, _, p in scored]
-        pass2 = all_scored[:30]
+        pass2 = [p for _, _, p in scored[:30]]
 
-        ce_result = self._cross_encoder_rerank(pref_query, pass2, top_k=top_k)
-
-        if not _LLM_KEY:
-            return ce_result
-
-        # Build slot summary for the LLM prompt
-        slot_parts = []
-        if slots.category:  slot_parts.append(f"category={slots.category}")
-        if slots.brand:     slot_parts.append(f"brand={slots.brand}")
-        if slots.gender:    slot_parts.append(f"gender={slots.gender}")
-        if slots.use_case:  slot_parts.append(f"use_case={slots.use_case}")
-        if slots.color:     slot_parts.append(f"color={slots.color}")
-        if slots.material:  slot_parts.append(f"material={slots.material}")
-        if slots.size:      slot_parts.append(f"size={slots.size}")
-        if slots.price_max: slot_parts.append(f"price_max=${slots.price_max:.2f}")
-        if slots.price_min: slot_parts.append(f"price_min=${slots.price_min:.2f}")
-        if slots.features:  slot_parts.append(f"features={slots.features}")
-        slot_summary = ", ".join(slot_parts) or pref_query
-
-        # LLM sees the full top-50, not just the top-30 the CE saw
-        llm_pool = all_scored[:50]
-        llm_result = _llm_rerank(slot_summary, llm_pool, top_k=top_k)
-        return llm_result if llm_result else ce_result
+        return self._cross_encoder_rerank(pref_query, pass2, top_k=top_k)
 
     def _cross_encoder_rerank(self, query: str, candidates: list[dict], top_k: int = 10) -> list[dict]:
         """Re-score candidates with the cross-encoder and return top_k sorted by score."""
@@ -633,10 +527,9 @@ def retrieve(
     top_k: int = 50,
     buying_mode: bool = False,
     category: str | None = None,
-    hyde_query: str | None = None,
 ) -> list[dict]:
     """Drop-in replacement for the retrieve() stub in interfaces.py."""
-    return _get_pipeline().retrieve(query, filters, top_k=top_k, buying_mode=buying_mode, category=category, hyde_query=hyde_query)
+    return _get_pipeline().retrieve(query, filters, top_k=top_k, buying_mode=buying_mode, category=category)
 
 
 def rerank(
