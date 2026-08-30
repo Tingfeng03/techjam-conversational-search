@@ -84,10 +84,6 @@ ALLOWED_ATTRIBUTES = {
     "budget", "feature", "use_case", "other",
 }
 
-_ATTR_TO_SLOTS: dict[str, list[str]] = {
-    "budget": ["price_max", "price_min"],
-    "feature": ["features"],
-}
 
 
 # =============================================================================
@@ -330,8 +326,6 @@ def update_state(state: ConversationState, message: str) -> ManagedState:
     turn = _current_turn(s)
     raw_message = message or ""
     s.history.append({"role": "user", "content": raw_message})
-    s.last_query = raw_message
-
     try:
         kind, fields = detect_message_type(raw_message)
         s.intent = classify_intent(raw_message, s.intent)
@@ -377,8 +371,6 @@ def update_state(state: ConversationState, message: str) -> ManagedState:
                 s.no_preference.add(attribute)
                 if attribute in ALLOWED_ATTRIBUTES:
                     s.asked_clarifications.add(attribute)
-                for slot in _ATTR_TO_SLOTS.get(attribute, []):
-                    s.asked_clarifications.add(slot)
 
         elif kind is MessageKind.BOUNDARY_NO_PREFERENCE:
             attribute = (fields.get("attribute") or "").strip().lower()
@@ -386,8 +378,6 @@ def update_state(state: ConversationState, message: str) -> ManagedState:
                 s.no_preference.add(attribute)
                 if attribute in ALLOWED_ATTRIBUTES:
                     s.asked_clarifications.add(attribute)
-                for slot in _ATTR_TO_SLOTS.get(attribute, []):
-                    s.asked_clarifications.add(slot)
 
         elif kind is MessageKind.REJECTION:
             # Real-user insurance: the evaluator never sends these. Reject the
