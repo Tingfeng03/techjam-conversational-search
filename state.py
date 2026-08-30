@@ -84,6 +84,25 @@ ALLOWED_ATTRIBUTES = {
     "budget", "feature", "use_case", "other",
 }
 
+# The evaluator and ask_attribute speak ATTRIBUTE names ("budget",
+# "feature") while the orchestrator missing-slot logic speaks SLOT names
+# ("price_max", "features"). When the user declines a clarification,
+# record the slot names too so Person 3 never re-asks a declined slot.
+# Every other attribute maps to a slot with the identical name.
+_ATTR_TO_SLOTS = {
+    "budget": ["price_max", "price_min"],
+    "feature": ["features"],
+}
+
+# Messages that carry no positive search signal. update_state keeps the
+# previous last_query on these so the reranker preference query is not
+# polluted with negation noise ("i don't have a preference for budget").
+_META_MESSAGE_KINDS = {
+    MessageKind.NO_PREFERENCE,
+    MessageKind.BOUNDARY_NO_PREFERENCE,
+    MessageKind.REJECTION,
+}
+
 
 
 # =============================================================================
@@ -329,6 +348,12 @@ def update_state(state: ConversationState, message: str) -> ManagedState:
     try:
         kind, fields = detect_message_type(raw_message)
         s.intent = classify_intent(raw_message, s.intent)
+        if kind not in _META_MESSAGE_KINDS:
+            # Content-bearing message. rerank() appends last_query to its
+            # preference query to catch signals ("cozy", "a special gift")
+            # not yet parsed into slots. Meta messages carry no positive
+            # signal, so they keep the previous query instead.
+            s.last_query = raw_message
 
         if kind is MessageKind.INITIAL_BUYING:
             if fields.get("category"):
@@ -370,14 +395,26 @@ def update_state(state: ConversationState, message: str) -> ManagedState:
             if attribute:
                 s.no_preference.add(attribute)
                 if attribute in ALLOWED_ATTRIBUTES:
+                    # Record the attribute AND its slot names. The
+                    # orchestrator checks slot names ("price_max") when
+                    # deciding what is still missing; without the mapped
+                    # slots a declined budget would be re-asked forever.
                     s.asked_clarifications.add(attribute)
+                    for slot in _ATTR_TO_SLOTS.get(attribute, []):
+                        s.asked_clarifications.add(slot)
 
         elif kind is MessageKind.BOUNDARY_NO_PREFERENCE:
             attribute = (fields.get("attribute") or "").strip().lower()
             if attribute:
                 s.no_preference.add(attribute)
                 if attribute in ALLOWED_ATTRIBUTES:
+                    # Record the attribute AND its slot names. The
+                    # orchestrator checks slot names ("price_max") when
+                    # deciding what is still missing; without the mapped
+                    # slots a declined budget would be re-asked forever.
                     s.asked_clarifications.add(attribute)
+                    for slot in _ATTR_TO_SLOTS.get(attribute, []):
+                        s.asked_clarifications.add(slot)
 
         elif kind is MessageKind.REJECTION:
             # Real-user insurance: the evaluator never sends these. Reject the
