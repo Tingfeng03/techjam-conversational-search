@@ -10,6 +10,7 @@ from pathlib import Path
 from catalog import Catalog
 from interfaces import ConversationState
 from retrieval import RetrievalPipeline
+from intent import MessageKind, detect_message_type
 from state import new_state, update_state, estimate_result_count
 from starter.orchestration.orchestration import (
     Orchestrator,
@@ -43,6 +44,7 @@ class Agent:
 
         current_state = self._states[session_id]
         current_state.turn_count = turn
+        msg_kind, _ = detect_message_type(user_message or "")
         state = update_state(current_state, user_message)
         state.turn_count = turn
         self._states[session_id] = state
@@ -50,6 +52,12 @@ class Agent:
 
         est = estimate_result_count(state, self.catalog)
         decision = self.orchestrator.decide(state, est)
+
+        # After an intent override the user has given a new hard requirement.
+        # Searching immediately (instead of asking another clarification) recovers
+        # a full turn of MTTC in the intent_override scenario (worst HR=0.300).
+        if msg_kind is MessageKind.OVERRIDE and decision.action == "SEARCH_AND_CLARIFY":
+            decision.action = "SEARCH"
 
         if decision.action == "CLARIFY":
             previously_asked = set(state.asked_clarifications)

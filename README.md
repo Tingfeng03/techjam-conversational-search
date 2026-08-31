@@ -18,15 +18,15 @@ The pipeline per turn:
 5. **Adaptive clarification** — retrieve first, then ask the question with highest `coverage × diversity × novelty` over the actual visible candidates
 6. **Intent override recovery** — when the user overrides mid-session, skip the clarification turn and search immediately
 
-**Final TechnicalScore: 0.7744** (baseline weak starter: 0.107 → our improvements: 0.7744)
+**Final TechnicalScore: 0.7836** (baseline weak starter: 0.107 → our improvements: 0.7836)
 
 | Scenario | HitRate@10 | MTTC |
 |---|---|---|
-| Buying | 0.925 | 3.0 turns |
-| Browsing | 0.9375 | 3.64 turns |
-| Intent Override | 0.900 | 5.3 turns |
-| Boundary | 0.800 | 5.5 turns |
-| **Overall** | **0.920** | **3.875 turns** |
+| Buying | 0.9125 | 3.1 turns |
+| Browsing | 0.925 | 4.0 turns |
+| Intent Override | 0.9667 | 5.3 turns |
+| Boundary | 0.900 | 4.4 turns |
+| **Overall** | **0.920** | **3.86 turns** |
 
 ---
 
@@ -186,9 +186,9 @@ Results are written to `results.json`. Expected output on the public set:
 
 ```
 hit_rate_at_10: 0.920
-mrr:            0.573
-mttc:           3.875
-TechnicalScore: 0.7744
+mrr:            0.5974
+mttc:           3.860
+TechnicalScore: 0.7836
 ```
 
 **Key files changed from the starter:**
