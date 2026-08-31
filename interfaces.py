@@ -280,7 +280,7 @@ class OrchestratorDecision:
         "CLARIFY"  — ask user a question, no retrieval this turn
         "FALLBACK" — could not find products, tell user to relax constraints
     """
-    action: str                         # "SEARCH" | "CLARIFY" | "FALLBACK" | "SEARCH_CLARIFY"
+    action: str                         # "SEARCH" | "CLARIFY" | "FALLBACK" | "SEARCH_AND_CLARIFY"
     missing_slots: list[str] = field(default_factory=list)  # only set when action="CLARIFY"
     reason: str = ""                    # short debug string e.g. "over_general", "near_limit"
     diverse: bool = False               # True = browsing mode, prioritise variety in retrieval

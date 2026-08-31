@@ -196,6 +196,7 @@ def _diversity(value_sets: list[set[str]]) -> float:
   non_empty = [values for values in value_sets if values]
   if len(non_empty) < 2:
     return 0.0
+  # if entry has multiple values, compute average pairwise Jaccard distance
   if any(len(values) > 1 for values in non_empty):
     distances: list[float] = []
     for index, left in enumerate(non_empty):
@@ -203,14 +204,18 @@ def _diversity(value_sets: list[set[str]]) -> float:
         union = left | right
         distances.append(1.0 - len(left & right) / len(union) if union else 0.0)
     return sum(distances) / len(distances) if distances else 0.0
+  
   counts = Counter(next(iter(values)) for values in non_empty)
   if len(counts) <= 1:
     return 0.0
+  # for single value, calculate normalised entropy
   entropy = -sum((count / len(non_empty)) * math.log(count / len(non_empty)) for count in counts.values())
   return entropy / math.log(len(counts))
 
 
 def _profile_multiplier(state: ConversationState, attribute: str) -> float:
+  # deliberately weak signal from profile data
+  # to break ties within close calls
   tags = {_norm(tag) for tag in ((state.user_profile or {}).get("preference_tags") or []) if _norm(tag)}
   words = _PROFILE_WORDS.get(attribute, set())
   aligned = any(tag in words or any(word in tag for word in words) for tag in tags)
@@ -222,7 +227,7 @@ class Orchestrator:
 
   TURN_FORCE_SEARCH = 10
   CANDIDATE_OVERLOAD_THRESHOLD = 500
-  MIN_ATTRIBUTE_COVERAGE = 0.20
+  MIN_ATTRIBUTE_COVERAGE = 0.20 # works for 10, behaviours might vary with various candidate pools size
 
   def __init__(self, answer_priors: Mapping[str, float] | None = None) -> None:
     self.answer_priors: dict[str, float] = {}
@@ -264,12 +269,19 @@ class Orchestrator:
       if self._asked_or_declined(state, attribute):
         continue
       value_sets = [_product_values(product, attribute) for product in candidates]
+      # to check if enough candidates have a value for current attribute
       coverage = sum(bool(values) for values in value_sets) / len(value_sets)
       if coverage < self.MIN_ATTRIBUTE_COVERAGE:
         continue
+      # to check if those values differ between candidates
+      # designed to reward attribute with more diversity, more diverse value -> easier to identify customer need
       diversity = _diversity(value_sets)
+      # metrics that check if user has supplied that preference or not
+      # can somewhat prevent repeatedly focusing on information already known
       novelty = 0.6 if self._known(state, attribute) else 1.0
       public_name = _ATTRIBUTE_TO_PUBLIC.get(attribute, attribute)
+      # optional now
+      # it's intended to encode observed user behaviour, e.g. likelihood to answer a type of question
       prior = self.answer_priors.get(public_name, 1.0)
       value = prior * coverage * (1.0 + diversity) * novelty * _profile_multiplier(state, attribute)
       scored.append((value, -order, attribute))
@@ -301,35 +313,3 @@ class Orchestrator:
     public_name = _ATTRIBUTE_TO_PUBLIC.get(attribute, attribute)
     return public_name in state.asked_clarifications
 
-  @staticmethod
-  def _get_priority_missing_slots(state: ConversationState) -> list[str]:
-    """Compatibility helper for callers of the former static policy."""
-    return [slot for slot in _ATTRIBUTE_ORDER if not getattr(state.slots, slot, None)]
-
-  def _get_priority_missing_slots(
-    self, 
-    state: ConversationState
-  ) -> list[str]:
-    if state.intent == "BROWSING":
-      priority_order = [
-        "use_case",
-        "style",
-        "features",
-        "gender",
-        "color",
-      ]
-    else:
-      priority_order = [
-        "use_case",
-        "price_max",
-        "gender",
-        "brand",
-        "size",
-        "material",
-        "color",
-      ]
-
-    return [
-      slot for slot in priority_order
-      if not getattr(state.slots, slot) and slot not in state.asked_clarifications
-    ]

@@ -87,6 +87,7 @@ class Agent:
                     decision.reason = self.orchestrator.clarification_diagnostic(
                         state, ranked, decision.missing_slots[0],
                     )
+                    # to infer which slot was asked, can be improved
                     asked = next(
                         (slot for slot in decision.missing_slots
                          if slot not in previously_asked and slot in state.asked_clarifications),

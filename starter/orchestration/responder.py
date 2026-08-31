@@ -98,7 +98,7 @@ class Responder:
         "usage": usage,
       }
 
-    if action in {"SEARCH_CLARIFY", "SEARCH_AND_CLARIFY"}:
+    if action == "SEARCH_AND_CLARIFY":
       question = clarification_question or "Could you tell me more about what you're looking for?"
       return {
         "message": f"{_search_message(ranked_products)} {question}",
