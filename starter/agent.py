@@ -18,13 +18,15 @@ from starter.orchestration.orchestration import (
     generate_clarification,
 )
 from starter.orchestration.responder import Responder
+from domain_schema import DEFAULT_SCHEMA
 
 
 class Agent:
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
         self.catalog = Catalog(catalog_path)
         self.retrieval = RetrievalPipeline(self.catalog)
-        self.orchestrator = Orchestrator()
+        self.schema = DEFAULT_SCHEMA
+        self.orchestrator = Orchestrator(schema=self.schema)
         self.responder = Responder()
         self._sessions: set[str] = set()
         self._states: dict[str, ConversationState] = {}
@@ -51,7 +53,7 @@ class Agent:
 
         if decision.action == "CLARIFY":
             previously_asked = set(state.asked_clarifications)
-            question = generate_clarification(decision.missing_slots, state)
+            question = generate_clarification(decision.missing_slots, state, self.schema)
             if question:
                 asked = next(
                     (slot for slot in decision.missing_slots
@@ -82,7 +84,7 @@ class Agent:
                     state, ranked,
                 )
                 previously_asked = set(state.asked_clarifications)
-                question = generate_clarification(decision.missing_slots, state)
+                question = generate_clarification(decision.missing_slots, state, self.schema)
                 if question:
                     decision.reason = self.orchestrator.clarification_diagnostic(
                         state, ranked, decision.missing_slots[0],

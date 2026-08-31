@@ -6,6 +6,7 @@ from collections import Counter
 from typing import Mapping
 
 from interfaces import ConversationState, Filters, OrchestratorDecision
+from domain_schema import DEFAULT_SCHEMA, DomainSchema
 
 
 _ATTRIBUTE_ORDER = ("features", "material", "color", "style", "size", "use_case", "price_max", "brand")
@@ -38,14 +39,18 @@ CLARIFICATION_QUESTIONS = {
   "other":     "Is there another specific requirement I should prioritize?",
 }
 
-def generate_clarification(missing_slots: list[str], state: ConversationState) -> str | None:
+def generate_clarification(missing_slots: list[str], state: ConversationState,
+                           schema: DomainSchema | None = None) -> str | None:
   """
   Picks the highest-priority unasked slot and returns a question.
   Returns None if we've already asked about everything.
   """
   for slot in missing_slots:
     if slot not in state.asked_clarifications:
-      template = CLARIFICATION_QUESTIONS.get(slot, f"Could you tell me more about the {slot} you prefer?")
+      spec = schema.get(slot) if schema else None
+      template = (spec.clarification_template if spec else None) or CLARIFICATION_QUESTIONS.get(
+        slot, f"Could you tell me more about the {slot} you prefer?"
+      )
       # Slots is a dataclass, not a mapping.  Use all attributes so templates
       # remain safe even when the referenced value has not been filled yet.
       values = vars(state.slots)
@@ -229,7 +234,9 @@ class Orchestrator:
   CANDIDATE_OVERLOAD_THRESHOLD = 500
   MIN_ATTRIBUTE_COVERAGE = 0.20 # works for 10, behaviours might vary with various candidate pools size
 
-  def __init__(self, answer_priors: Mapping[str, float] | None = None) -> None:
+  def __init__(self, answer_priors: Mapping[str, float] | None = None,
+               schema: DomainSchema | None = None) -> None:
+    self.schema = schema or DEFAULT_SCHEMA
     self.answer_priors: dict[str, float] = {}
     for attribute, value in (answer_priors or {}).items():
       try:
@@ -245,9 +252,11 @@ class Orchestrator:
     estimated_candidates: int,
   ) -> OrchestratorDecision:
 
-    if not state.slots.category:
+    required = next((spec.name for spec in self.schema.attributes
+                     if spec.required_for_search), "category")
+    if not getattr(state.slots, required, None):
       return OrchestratorDecision(
-        action="CLARIFY", missing_slots=["category"], reason="no_searchable_category",
+        action="CLARIFY", missing_slots=[required], reason="no_searchable_category",
       )
     if state.turn_count >= self.TURN_FORCE_SEARCH:
       return OrchestratorDecision(
@@ -265,10 +274,15 @@ class Orchestrator:
     if not candidates:
       return []
     scored: list[tuple[float, int, str]] = []
-    for order, attribute in enumerate(_ATTRIBUTE_ORDER):
+    configured = tuple(spec.name for spec in self.schema.clarifiable())
+    attributes = configured or _ATTRIBUTE_ORDER
+    for order, attribute in enumerate(attributes):
       if self._asked_or_declined(state, attribute):
         continue
-      value_sets = [_product_values(product, attribute) for product in candidates]
+      spec = self.schema.get(attribute)
+      extractor = spec.product_values if spec and spec.product_values else None
+      value_sets = [extractor(product) if extractor else _product_values(product, attribute)
+                    for product in candidates]
       # to check if enough candidates have a value for current attribute
       coverage = sum(bool(values) for values in value_sets) / len(value_sets)
       if coverage < self.MIN_ATTRIBUTE_COVERAGE:
@@ -279,7 +293,7 @@ class Orchestrator:
       # metrics that check if user has supplied that preference or not
       # can somewhat prevent repeatedly focusing on information already known
       novelty = 0.6 if self._known(state, attribute) else 1.0
-      public_name = _ATTRIBUTE_TO_PUBLIC.get(attribute, attribute)
+      public_name = spec.public_name if spec else _ATTRIBUTE_TO_PUBLIC.get(attribute, attribute)
       # optional now
       # it's intended to encode observed user behaviour, e.g. likelihood to answer a type of question
       prior = self.answer_priors.get(public_name, 1.0)
@@ -293,22 +307,27 @@ class Orchestrator:
     return []
 
   def clarification_diagnostic(self, state: ConversationState, candidates: list[dict], attribute: str) -> str:
-    value_sets = [_product_values(product, attribute) for product in candidates]
+    spec = self.schema.get(attribute)
+    extractor = spec.product_values if spec and spec.product_values else None
+    value_sets = [extractor(product) if extractor else _product_values(product, attribute)
+                  for product in candidates]
     coverage = sum(bool(values) for values in value_sets) / len(value_sets) if value_sets else 0.0
     diversity = _diversity(value_sets)
     novelty = 0.6 if self._known(state, attribute) else 1.0
-    public_name = _ATTRIBUTE_TO_PUBLIC.get(attribute, attribute)
+    public_name = spec.public_name if spec else _ATTRIBUTE_TO_PUBLIC.get(attribute, attribute)
     prior = self.answer_priors.get(public_name, 1.0)
     value = prior * coverage * (1.0 + diversity) * novelty * _profile_multiplier(state, attribute)
     return f"adaptive:{public_name}:value={value:.3f}:coverage={coverage:.2f}:diversity={diversity:.2f}"
 
   @staticmethod
   def _known(state: ConversationState, attribute: str) -> bool:
-    return any(bool(getattr(state.slots, slot, None)) for slot in _ATTRIBUTE_SLOTS[attribute])
+    slots = _ATTRIBUTE_SLOTS.get(attribute, (attribute,))
+    return any(bool(getattr(state.slots, slot, None)) for slot in slots)
 
   @staticmethod
   def _asked_or_declined(state: ConversationState, attribute: str) -> bool:
-    if any(slot in state.asked_clarifications for slot in _ATTRIBUTE_SLOTS[attribute]):
+    slots = _ATTRIBUTE_SLOTS.get(attribute, (attribute,))
+    if any(slot in state.asked_clarifications for slot in slots):
       return True
     public_name = _ATTRIBUTE_TO_PUBLIC.get(attribute, attribute)
     return public_name in state.asked_clarifications

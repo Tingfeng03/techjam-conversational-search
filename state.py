@@ -57,6 +57,7 @@ from typing import Any
 
 from intent import MessageKind, classify_intent, detect_message_type, normalize_text
 from interfaces import ConversationState, Slots
+from domain_schema import DEFAULT_SCHEMA
 
 
 # =============================================================================
@@ -97,6 +98,7 @@ _META_MESSAGE_KINDS = {
     MessageKind.NO_PREFERENCE,
     MessageKind.BOUNDARY_NO_PREFERENCE,
     MessageKind.REJECTION,
+    MessageKind.NO_ANSWER,    
 }
 
 
@@ -182,6 +184,13 @@ def constraint_to_slots(constraint: str) -> tuple[dict[str, Any], list[str]]:
         return {}, [raw]
 
     return {}, [raw]
+
+
+def extract_constraints(constraint: str) -> tuple[dict[str, Any], list[str]]:
+    """Schema-owned extraction seam; deterministic clothing parser is active."""
+    extracted = DEFAULT_SCHEMA.extractor.extract(constraint, {}) if DEFAULT_SCHEMA.extractor else {}
+    features = extracted.get("features") or []
+    return ({k: v for k, v in extracted.items() if k != "features"}, list(features))
 
 
 # =============================================================================
@@ -355,7 +364,7 @@ def update_state(state: ConversationState, message: str) -> ManagedState:
             if fields.get("category"):
                 s.slots.category = fields["category"]
             if fields.get("constraint"):
-                scalars, feats = constraint_to_slots(fields["constraint"])
+                scalars, feats = extract_constraints(fields["constraint"])
                 _apply_disclosure(s, turn, "initial_hard", fields["constraint"], scalars, feats)
 
         elif kind is MessageKind.INITIAL_BROWSING:
@@ -366,7 +375,7 @@ def update_state(state: ConversationState, message: str) -> ManagedState:
             if fields.get("category"):
                 s.slots.category = fields["category"]
             if fields.get("constraint"):
-                scalars, feats = constraint_to_slots(fields["constraint"])
+                scalars, feats = extract_constraints(fields["constraint"])
                 _apply_disclosure(s, turn, "initial_soft", fields["constraint"], scalars, feats)
 
         elif kind is MessageKind.OVERRIDE:
@@ -377,13 +386,13 @@ def update_state(state: ConversationState, message: str) -> ManagedState:
                 # accumulated via later ask_attribute replies stay valid.
                 if s.disclosures:
                     _revert_disclosure(s, s.disclosures[0])
-                scalars, feats = constraint_to_slots(value)
+                scalars, feats = extract_constraints(value)
                 _apply_disclosure(s, turn, "override", value, scalars, feats)
 
         elif kind is MessageKind.ANSWER:
             items = [item.strip() for item in (fields.get("items") or "").split(";") if item.strip()]
             for item in items:
-                scalars, feats = constraint_to_slots(item)
+                scalars, feats = extract_constraints(item)
                 _apply_disclosure(s, turn, "answer", item, scalars, feats)
 
         elif kind is MessageKind.NO_PREFERENCE:
@@ -444,7 +453,7 @@ def _fallback_extract(s: ManagedState, message: str, turn: int) -> None:
         if not s.slots.category:
             s.slots.category = m.group(1).strip().rstrip(",")
 
-    scalars, feats = constraint_to_slots(text)
+    scalars, feats = extract_constraints(text)
     if scalars or feats:
         _apply_disclosure(s, turn, "heuristic", text, scalars, feats)
         return
