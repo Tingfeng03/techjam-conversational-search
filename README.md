@@ -147,13 +147,6 @@ starter/agent.py                  editable weak starter
 evaluator/local_evaluator.py      public-set simulator and scorer
 ```
 
-## Judging and Submission Policy
-
-- Participant submission requirements: `docs/submission_rules.md`
-- Organizer-only final judging controls: `organizer/JUDGING_RUNBOOK.md`
-- Organizer private release checklist: `organizer/private_release_checklist.md`
-- Judging day operations SOP: `organizer/JUDGING_DAY_SOP.md`
-
 ---
 
 ## Steps to Reproduce Our Results
@@ -228,13 +221,13 @@ TechnicalScore: 0.7836
 
 ---
 
-## Team Member Contributions
+## Contributors
 
 | Member | Contributions |
 |---|---|
-| **Person 1** | `catalog.py` — product loading, BM25 index, bi-encoder embedding cache, cross-encoder model load; `retrieval.py` — hybrid BM25+vector retrieval, RRF fusion, category pre-filtering, three-pass reranker, structural scoring, natural-language CE query, CE doc enrichment |
-| **Person 2** | `domain_schema.py` — schema-driven architecture (`AttributeSpec`, `DomainSchema`); schema integration into `Orchestrator`; `GENERALITY_STATUS.md` |
-| **Person 3** | `state.py` — full constraint parsing pipeline (`constraint_to_slots`, `_extract_slots_from_category`), intent detection integration; `starter/orchestration/orchestration.py` — `Orchestrator.decide()`, `rank_clarifications()`, adaptive clarification scoring; `starter/agent.py` — full agent wiring, OVERRIDE intercept; `starter/orchestration/responder.py` |
+| [@lin001234](https://github.com/lin001234) | product loading, BM25 index, bi-encoder embedding cache, cross-encoder model load; hybrid BM25+vector retrieval, RRF fusion, category pre-filtering, three-pass reranker, structural scoring, natural-language CE query, CE doc enrichment |
+| [@zzxc-tech](https://github.com/zzxc-tech) | full constraint parsing pipeline (`constraint_to_slots`, `_extract_slots_from_category`), intent detection |
+| [@tingfeng03](https://github.com/Tingfeng03) | `Orchestrator.decide()`, `rank_clarifications()`, adaptive clarification scoring; full agent wiring, OVERRIDE intercept; generate respond; schema-driven architecture(partially done)
 
 ---
 
