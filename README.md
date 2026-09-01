@@ -18,15 +18,15 @@ The pipeline per turn:
 5. **Adaptive clarification** — retrieve first, then ask the question with highest `coverage × diversity × novelty` over the actual visible candidates
 6. **Intent override recovery** — when the user overrides mid-session, skip the clarification turn and search immediately
 
-**Final TechnicalScore: 0.7744** (baseline weak starter: 0.107 → our improvements: 0.7744)
+**Final TechnicalScore: 0.7836** (baseline weak starter: 0.107 → our improvements: 0.7836)
 
 | Scenario | HitRate@10 | MTTC |
 |---|---|---|
-| Buying | 0.925 | 3.0 turns |
-| Browsing | 0.9375 | 3.64 turns |
-| Intent Override | 0.900 | 5.3 turns |
-| Boundary | 0.800 | 5.5 turns |
-| **Overall** | **0.920** | **3.875 turns** |
+| Buying | 0.9125 | 3.1 turns |
+| Browsing | 0.925 | 4.0 turns |
+| Intent Override | 0.9667 | 5.3 turns |
+| Boundary | 0.900 | 4.4 turns |
+| **Overall** | **0.920** | **3.86 turns** |
 
 ---
 
@@ -147,13 +147,6 @@ starter/agent.py                  editable weak starter
 evaluator/local_evaluator.py      public-set simulator and scorer
 ```
 
-## Judging and Submission Policy
-
-- Participant submission requirements: `docs/submission_rules.md`
-- Organizer-only final judging controls: `organizer/JUDGING_RUNBOOK.md`
-- Organizer private release checklist: `organizer/private_release_checklist.md`
-- Judging day operations SOP: `organizer/JUDGING_DAY_SOP.md`
-
 ---
 
 ## Steps to Reproduce Our Results
@@ -186,9 +179,9 @@ Results are written to `results.json`. Expected output on the public set:
 
 ```
 hit_rate_at_10: 0.920
-mrr:            0.573
-mttc:           3.875
-TechnicalScore: 0.7744
+mrr:            0.5974
+mttc:           3.860
+TechnicalScore: 0.7836
 ```
 
 **Key files changed from the starter:**
@@ -228,13 +221,13 @@ TechnicalScore: 0.7744
 
 ---
 
-## Team Member Contributions
+## Contributors
 
 | Member | Contributions |
 |---|---|
-| **Person 1** | `catalog.py` — product loading, BM25 index, bi-encoder embedding cache, cross-encoder model load; `retrieval.py` — hybrid BM25+vector retrieval, RRF fusion, category pre-filtering, three-pass reranker, structural scoring, natural-language CE query, CE doc enrichment |
-| **Person 2** | `domain_schema.py` — schema-driven architecture (`AttributeSpec`, `DomainSchema`); schema integration into `Orchestrator`; `GENERALITY_STATUS.md` |
-| **Person 3** | `state.py` — full constraint parsing pipeline (`constraint_to_slots`, `_extract_slots_from_category`), intent detection integration; `starter/orchestration/orchestration.py` — `Orchestrator.decide()`, `rank_clarifications()`, adaptive clarification scoring; `starter/agent.py` — full agent wiring, OVERRIDE intercept; `starter/orchestration/responder.py` |
+| [@lin001234](https://github.com/lin001234) | product loading, BM25 index, bi-encoder embedding cache, cross-encoder model load; hybrid BM25+vector retrieval, RRF fusion, category pre-filtering, three-pass reranker, structural scoring, natural-language CE query, CE doc enrichment |
+| [@zzxc-tech](https://github.com/zzxc-tech) | full constraint parsing pipeline (`constraint_to_slots`, `_extract_slots_from_category`), intent detection |
+| [@tingfeng03](https://github.com/Tingfeng03) | `Orchestrator.decide()`, `rank_clarifications()`, adaptive clarification scoring; full agent wiring, OVERRIDE intercept; generate respond; schema-driven architecture(partially done)
 
 ---
 

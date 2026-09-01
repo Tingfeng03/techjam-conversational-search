@@ -68,11 +68,13 @@ from domain_schema import DEFAULT_SCHEMA
 MATERIALS = ("cotton", "polyester", "nylon", "leather", "wool", "spandex", "silk", "rayon", "fabric")
 _MATERIAL_RE = re.compile(r"\b(cotton|polyester|nylon|leather|wool|spandex|silk|rayon|fabric)\b", re.I)
 _COLOR_RE = re.compile(
-    r"\b(black|white|blue|red|pink|green|brown|gray|grey|purple|yellow|orange)\b", re.I
+    r"\b(black|white|blue|red|pink|green|brown|gray|grey|purple|yellow|orange|"
+    r"navy|beige|cream|burgundy|teal|maroon|ivory|coral|olive|tan|silver|gold)\b", re.I
 )
 _SIZE_WORDS = ("size", "sizing", "width", "wide", "narrow")
 _STYLE_WORDS = ("department", "style", "fit", "sleeve", "neck")
-_USE_CASE_WORDS = ("hiking", "running", "gym", "winter", "outdoor", "work")
+_USE_CASE_WORDS = ("hiking", "running", "gym", "winter", "outdoor", "work",
+                   "yoga", "cycling", "walking", "casual", "formal", "travel", "swimming")
 _BUDGET_RE = re.compile(r"\$\s*(\d+(?:\.\d{1,2})?)")
 _GENDER_VALUE_RE = re.compile(r"^department\s*:\s*(.+)$", re.I)
 _BRAND_VALUE_RE = re.compile(r"^brand\s*:\s*(.+)$", re.I)

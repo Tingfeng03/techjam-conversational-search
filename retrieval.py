@@ -53,6 +53,42 @@ _MATERIAL_RE = re.compile(
 )
 
 
+def _build_ce_query(slots, last_query: str | None = None) -> str:
+    """Build a product-title-style query for the cross-encoder.
+
+    Cross-encoders are trained on (query, document) pairs where queries are
+    natural phrases, not keyword bags. This matches the distribution of the
+    documents (product titles) better than joining slot values with spaces.
+    """
+    phrase: list[str] = []
+    if slots.brand:
+        phrase.append(slots.brand)
+    if slots.gender:
+        g = slots.gender.lower()
+        if g in ("men", "man", "male"):
+            phrase.append("men's")
+        elif g in ("women", "woman", "female"):
+            phrase.append("women's")
+        else:
+            phrase.append(slots.gender)
+    for val in (slots.color, slots.material, slots.style):
+        if isinstance(val, str) and val.strip():
+            phrase.append(val.strip())
+    if slots.category:
+        phrase.append(slots.category)
+    if slots.use_case:
+        phrase.append(f"for {slots.use_case}")
+    if slots.size:
+        phrase.append(f"size {slots.size}")
+    for feat in (slots.features or [])[:2]:
+        if isinstance(feat, str) and feat.strip():
+            phrase.append(feat.strip())
+    if isinstance(last_query, str) and last_query.strip():
+        phrase.append(last_query.strip())
+    result = " ".join(dict.fromkeys(p for p in phrase if p))
+    return result.strip()
+
+
 def _searchable_text(product: dict) -> str:
     title = product.get("title") or ""
     store = product.get("store") or ""
@@ -159,17 +195,20 @@ class RetrievalPipeline:
         top_k: int = 50,
         buying_mode: bool = False,
         category: str | None = None,
+        hyde_query: str | None = None,
     ) -> list[dict]:
         """
         Hybrid BM25 + vector retrieval with RRF fusion and hard filtering.
 
         Args:
-            query       : Free-text query built from slots
+            query       : Free-text query built from slots (used for BM25)
             filters     : Hard constraints (price, brand, rejected)
             top_k       : Number of candidates to return
             buying_mode : If True, hard-exclude filter violations;
                           if False, include more broadly (browsing)
             category    : If set, restrict search to products in this category
+            hyde_query  : If set, use this product-title-style phrase for vector
+                          search (BM25 keeps using the keyword query)
 
         Returns:
             List of up to top_k raw product dicts, best first.
@@ -180,7 +219,10 @@ class RetrievalPipeline:
         allowed = self._get_category_indices(category) if category else None
 
         bm25_results = self._bm25_search(query, top_k=_ARM_TOP_K, allowed_indices=allowed)
-        vec_results = self._vector_search(query, top_k=_ARM_TOP_K, allowed_indices=allowed)
+        vec_results = self._vector_search(
+            hyde_query if (hyde_query and hyde_query.strip()) else query,
+            top_k=_ARM_TOP_K, allowed_indices=allowed,
+        )
 
         fused = self._rrf_merge(bm25_results, vec_results)
 
@@ -241,9 +283,9 @@ class RetrievalPipeline:
         ) if v) + (1 if slots.price_max or slots.price_min else 0) + min(len(slots.features or []), 2)
 
         if filled_slots >= 3:
-            w_struct, w_sem, w_rating = 0.60, 0.30, 0.02
+            w_struct, w_sem, w_rating = 0.50, 0.40, 0.02
         elif filled_slots >= 1:
-            w_struct, w_sem, w_rating = 0.40, 0.45, 0.02
+            w_struct, w_sem, w_rating = 0.30, 0.55, 0.02
         else:
             w_struct, w_sem, w_rating = 0.10, 0.70, 0.02
 
@@ -273,11 +315,13 @@ class RetrievalPipeline:
             scored.append((score, rank, p))
 
         scored.sort(key=lambda x: (-x[0], x[1]))
-        pass2 = [p for _, _, p in scored[:30]]
+        pass2 = [p for _, _, p in scored[:40]]
 
-        return self._cross_encoder_rerank(pref_query, pass2, top_k=top_k)
+        ce_query = _build_ce_query(slots, state.last_query) or pref_query
+        return self._cross_encoder_rerank(ce_query, pass2, state, top_k=top_k)
 
-    def _cross_encoder_rerank(self, query: str, candidates: list[dict], top_k: int = 10) -> list[dict]:
+    def _cross_encoder_rerank(self, query: str, candidates: list[dict],
+                               state: ConversationState | None = None, top_k: int = 10) -> list[dict]:
         """Re-score candidates with the cross-encoder and return top_k sorted by score."""
         if not candidates:
             return candidates
@@ -290,11 +334,27 @@ class RetrievalPipeline:
             cats = [c for c in (p.get("categories") or [])
                     if c.lower() not in {"clothing, shoes & jewelry", "clothing shoes & jewelry"}]
             cat_text = " ".join(cats[:3])
-            doc = " | ".join(filter(None, [title, store, features, cat_text]))
+            details = p.get("details") or {}
+            dept = details.get("Department") or ""
+            color = details.get("Color") or ""
+            material = details.get("Material") or ""
+            doc = " | ".join(filter(None, [title, store, dept, color, material, features, cat_text]))
             pairs.append([query, doc])
 
-        scores = self.catalog.cross_encoder.predict(pairs)
-        ranked = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
+        ce_scores = self.catalog.cross_encoder.predict(pairs)
+
+        if state is not None:
+            # Blend CE score with a small structural nudge so that when two
+            # products have similar CE scores, the one matching more constraints
+            # (brand, color, gender, price) wins.
+            final_scores = [
+                ce + 1.0 * _structural_score(p, state)
+                for ce, p in zip(ce_scores, candidates)
+            ]
+        else:
+            final_scores = list(ce_scores)
+
+        ranked = sorted(zip(final_scores, candidates), key=lambda x: x[0], reverse=True)
         return [p for _, p in ranked[:top_k]]
 
     # ------------------------------------------------------------------
@@ -527,9 +587,11 @@ def retrieve(
     top_k: int = 50,
     buying_mode: bool = False,
     category: str | None = None,
+    hyde_query: str | None = None,
 ) -> list[dict]:
     """Drop-in replacement for the retrieve() stub in interfaces.py."""
-    return _get_pipeline().retrieve(query, filters, top_k=top_k, buying_mode=buying_mode, category=category)
+    return _get_pipeline().retrieve(query, filters, top_k=top_k, buying_mode=buying_mode,
+                                    category=category, hyde_query=hyde_query)
 
 
 def rerank(
